@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import { GoogleGenAI } from "@google/genai";
-import { createServer as createViteServer } from "vite";
 import { createClient } from "@supabase/supabase-js";
 
 // Validate menu files on startup (non-fatal check)
@@ -162,10 +161,16 @@ function writeDB(data: DBStructure) {
 const app = express();
 app.use(express.json());
 
+// Log all incoming requests for easier debugging in Vercel logs
+app.use((req, res, next) => {
+  console.log(`[Express] Incoming request: ${req.method} ${req.url}`);
+  next();
+});
+
   // API endpoints FIRST
 
   // GET MENU
-  app.get("/api/menu", (req, res) => {
+  app.get(["/api/menu", "/menu"], (req, res) => {
     try {
       const menu = loadMenu();
       res.json({ success: true, menu });
@@ -175,7 +180,7 @@ app.use(express.json());
   });
 
   // GET PAST ORDERS (Admin Table View)
-  app.get("/api/orders", async (req, res) => {
+  app.get(["/api/orders", "/orders"], async (req, res) => {
     try {
       const supabase = getServerSupabase();
       if (supabase) {
@@ -223,7 +228,7 @@ app.use(express.json());
   });
 
   // GET CUSTOMER HISTORY (Greeting & repeat customer recognition)
-  app.get("/api/customer/:phone", async (req, res) => {
+  app.get(["/api/customer/:phone", "/customer/:phone"], async (req, res) => {
     try {
       const { phone } = req.params;
       const supabase = getServerSupabase();
@@ -294,7 +299,7 @@ app.use(express.json());
   });
 
   // POST NEW ORDER (Supports backward-compatible single item or multi-item basket)
-  app.post("/api/orders", async (req, res) => {
+  app.post(["/api/orders", "/orders"], async (req, res) => {
     try {
       const { customer_name, phone, base_id, pizza_id, topping_ids, quantity, payment_mode, basket } = req.body;
 
@@ -534,7 +539,7 @@ Payment Mode: ${payment_mode}
   });
 
   // AI POWERED DEMAND AND SALES INSIGHTS
-  app.post("/api/ai/insights", async (req, res) => {
+  app.post(["/api/ai/insights", "/ai/insights"], async (req, res) => {
     try {
       const { question } = req.body;
       if (!question || typeof question !== "string") {
@@ -670,6 +675,7 @@ ${recentOrders}
   // Setup Vite development server or serve production build
   async function setupServer() {
     if (process.env.NODE_ENV !== "production") {
+      const { createServer: createViteServer } = await import("vite");
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa",
