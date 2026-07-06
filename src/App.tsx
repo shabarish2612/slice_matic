@@ -65,9 +65,32 @@ export interface BasketItem {
   unitTotal: number;
 }
 
+const DEFAULT_MENU: MenuItem[] = [
+  // Base Crusts
+  { id: 1, name: "Thin Crust", price: 150, category: "Base" },
+  { id: 2, name: "Thick Crust", price: 180, category: "Base" },
+  { id: 3, name: "Cheese Burst", price: 250, category: "Base" },
+  { id: 4, name: "Gluten Free Crust", price: 220, category: "Base" },
+  // Pizza Styles
+  { id: 5, name: "Margherita", price: 299, category: "Pizza" },
+  { id: 6, name: "Farmhouse", price: 399, category: "Pizza" },
+  { id: 7, name: "Peppy Paneer", price: 420, category: "Pizza" },
+  { id: 8, name: "Chicken Tikka", price: 480, category: "Pizza" },
+  { id: 9, name: "Pepperoni Feast", price: 520, category: "Pizza" },
+  { id: 10, name: "Veggie Paradise", price: 380, category: "Pizza" },
+  // Toppings
+  { id: 11, name: "Extra Cheese", price: 80, category: "Topping" },
+  { id: 12, name: "Mushrooms", price: 60, category: "Topping" },
+  { id: 13, name: "Black Olives", price: 50, category: "Topping" },
+  { id: 14, name: "Jalapenos", price: 55, category: "Topping" },
+  { id: 15, name: "Onions", price: 30, category: "Topping" },
+  { id: 16, name: "Bell Peppers", price: 40, category: "Topping" },
+  { id: 17, name: "Grilled Chicken", price: 120, category: "Topping" }
+];
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<"order" | "admin">("order");
-  const [menu, setMenu] = useState<MenuItem[]>([]);
+  const [menu, setMenu] = useState<MenuItem[]>(DEFAULT_MENU);
   const [orders, setOrders] = useState<Order[]>([]);
   const [basket, setBasket] = useState<BasketItem[]>([]);
   
@@ -149,15 +172,10 @@ export default function App() {
     setLoadingMenu(true);
     setApiError(null);
     try {
-      const res = await fetch("/api/menu");
-      const data = await res.json();
-      if (data.success) {
-        setMenu(data.menu);
-      } else {
-        setApiError(data.error || "Failed to load menu items.");
-      }
+      // Menu is statically pre-loaded, ensuring 100% availability
+      setMenu(DEFAULT_MENU);
     } catch (err) {
-      setApiError("Express server is not responding. Ensure the backend is running on port 3000.");
+      setApiError("Failed to load menu items.");
     } finally {
       setLoadingMenu(false);
     }
@@ -166,13 +184,47 @@ export default function App() {
   const fetchOrders = async () => {
     setLoadingOrders(true);
     try {
-      const res = await fetch("/api/orders");
-      const data = await res.json();
-      if (data.success) {
-        setOrders(data.orders);
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        const { data: dbOrders, error: ordersErr } = await supabase
+          .from("orders")
+          .select("*")
+          .order("created_at", { ascending: false });
+
+        if (ordersErr) throw ordersErr;
+
+        if (dbOrders) {
+          const { data: dbItems, error: itemsErr } = await supabase
+            .from("order_items")
+            .select("*");
+
+          if (itemsErr) throw itemsErr;
+
+          if (dbItems) {
+            const ordersWithItems = dbOrders.map((order: any) => {
+              const items = dbItems.filter((item: any) => item.order_id === order.id);
+              return { ...order, items };
+            });
+            setOrders(ordersWithItems);
+            return;
+          }
+        }
       }
-    } catch (err) {
-      console.error("Error loading past orders:", err);
+      
+      // Fallback to local storage
+      const localOrders = JSON.parse(localStorage.getItem("slicematic_local_orders") || "[]");
+      const localItems = JSON.parse(localStorage.getItem("slicematic_local_items") || "[]");
+      const sortedOrders = [...localOrders].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+      const ordersWithItems = sortedOrders.map((order: any) => {
+        const items = localItems.filter((item: any) => item.order_id === order.id);
+        return { ...order, items };
+      });
+      setOrders(ordersWithItems);
+    } catch (err: any) {
+      console.error("Error loading past orders from Supabase:", err);
+      setApiError(`Failed to load orders: ${err.message || err}`);
     } finally {
       setLoadingOrders(false);
     }
@@ -181,13 +233,66 @@ export default function App() {
   const lookupCustomer = async (phoneStr: string) => {
     setCheckingCustomer(true);
     try {
-      const res = await fetch(`/api/customer/${phoneStr}`);
-      const data = await res.json();
-      if (data.success && data.returning) {
-        setRepeatCustomer(data);
-        // Pre-fill name if not already typed by user
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        const { data: customerOrders, error: ordersErr } = await supabase
+          .from("orders")
+          .select("*")
+          .eq("phone", phoneStr);
+
+        if (!ordersErr && customerOrders && customerOrders.length > 0) {
+          const sorted = [...customerOrders].sort(
+            (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+          );
+          const lastOrder = sorted[0];
+
+          const { data: lastOrderItems, error: itemsErr } = await supabase
+            .from("order_items")
+            .select("*")
+            .eq("order_id", lastOrder.id);
+
+          if (!itemsErr && lastOrderItems) {
+            setRepeatCustomer({
+              returning: true,
+              customer_name: lastOrder.customer_name,
+              last_order: {
+                ...lastOrder,
+                items: lastOrderItems
+              },
+              order_count: customerOrders.length
+            });
+            // Pre-fill name if not already typed by user
+            if (!customerName.trim()) {
+              setCustomerName(lastOrder.customer_name);
+            }
+            return;
+          }
+        }
+      }
+
+      // Fallback to local storage lookup
+      const localOrders = JSON.parse(localStorage.getItem("slicematic_local_orders") || "[]") as Order[];
+      const localItems = JSON.parse(localStorage.getItem("slicematic_local_items") || "[]") as OrderItem[];
+      const customerOrders = localOrders.filter(o => o.phone === phoneStr);
+      
+      if (customerOrders.length > 0) {
+        const sorted = [...customerOrders].sort(
+          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        );
+        const lastOrder = sorted[0];
+        const lastOrderItems = localItems.filter(item => item.order_id === lastOrder.id);
+
+        setRepeatCustomer({
+          returning: true,
+          customer_name: lastOrder.customer_name,
+          last_order: {
+            ...lastOrder,
+            items: lastOrderItems
+          },
+          order_count: customerOrders.length
+        });
         if (!customerName.trim()) {
-          setCustomerName(data.customer_name);
+          setCustomerName(lastOrder.customer_name);
         }
       } else {
         setRepeatCustomer(null);
@@ -374,43 +479,144 @@ export default function App() {
     setSubmittingOrder(true);
     setApiError(null);
 
-    const orderPayload = {
-      customer_name: customerName,
-      phone: customerPhone,
-      payment_mode: paymentMode,
-      basket: finalBasketList.map(item => ({
-        base_id: item.base_id,
-        pizza_id: item.pizza_id,
-        topping_ids: item.topping_ids,
-        quantity: item.quantity
-      }))
+    const orderId = `ord-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    const timestamp = new Date().toISOString();
+
+    const trimmedName = customerName.trim();
+    const trimmedPhone = customerPhone.trim();
+
+    let totalQty = 0;
+    let orderSubtotal = 0;
+    const dbOrderItemsPayload: any[] = [];
+    const billItemsPayload: any[] = [];
+
+    finalBasketList.forEach((item, i) => {
+      const parsedQty = item.quantity;
+      totalQty += parsedQty;
+      orderSubtotal += item.unitTotal * parsedQty;
+
+      const itemTimePrefix = `${Date.now()}-${i}`;
+      
+      // Base
+      dbOrderItemsPayload.push({
+        id: `oi-${itemTimePrefix}-base`,
+        order_id: orderId,
+        menu_item_name: item.baseName,
+        category: "Base",
+        unit_price: item.basePrice,
+        quantity: parsedQty
+      });
+
+      // Pizza Style
+      dbOrderItemsPayload.push({
+        id: `oi-${itemTimePrefix}-pizza`,
+        order_id: orderId,
+        menu_item_name: item.pizzaName,
+        category: "Pizza",
+        unit_price: item.pizzaPrice,
+        quantity: parsedQty
+      });
+
+      // Toppings
+      item.toppings.forEach((t, idx) => {
+        dbOrderItemsPayload.push({
+          id: `oi-${itemTimePrefix}-top-${idx}`,
+          order_id: orderId,
+          menu_item_name: t.name,
+          category: "Topping",
+          unit_price: t.price,
+          quantity: parsedQty
+        });
+      });
+
+      const toppingsDetail = item.toppings.map(t => t.name).join(", ");
+      const itemLabel = `${item.baseName} Crust + ${item.pizzaName}${toppingsDetail ? ` (${toppingsDetail})` : ""}`;
+      billItemsPayload.push({
+        name: `${itemLabel} (x${parsedQty})`,
+        price: item.unitTotal * parsedQty,
+        category: "Pizza Combo"
+      });
+    });
+
+    const discount = totalQty >= 5 ? parseFloat((orderSubtotal * 0.10).toFixed(2)) : 0;
+    const postDiscountTotal = orderSubtotal - discount;
+    const gst = parseFloat((postDiscountTotal * 0.18).toFixed(2));
+    const total = parseFloat((postDiscountTotal + gst).toFixed(2));
+
+    const newOrder = {
+      id: orderId,
+      customer_name: trimmedName,
+      phone: trimmedPhone,
+      subtotal: orderSubtotal,
+      discount,
+      gst,
+      total,
+      payment_mode: paymentMode || "Cash",
+      created_at: timestamp
+    };
+
+    const bill = {
+      customer_name: trimmedName,
+      phone: trimmedPhone,
+      items: billItemsPayload,
+      quantity: totalQty,
+      subtotal: orderSubtotal,
+      discount,
+      gst,
+      total,
+      payment_mode: paymentMode || "Cash",
+      created_at: timestamp
     };
 
     try {
-      const res = await fetch("/api/orders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(orderPayload)
-      });
-      const data = await res.json();
-      if (data.success) {
-        setPlacedOrder(data.bill);
-        // Clear order form and basket
-        setCustomerName("");
-        setCustomerPhone("");
-        setSelectedBase(null);
-        setSelectedPizza(null);
-        setSelectedToppings([]);
-        setQuantity(1);
-        setBasket([]);
-        setPaymentMode(null);
-        setRepeatCustomer(null);
-        setErrors({});
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        // Insert into orders
+        const { error: orderInsErr } = await supabase
+          .from("orders")
+          .insert([newOrder]);
+
+        if (orderInsErr) {
+          throw orderInsErr;
+        }
+
+        // Insert into order_items
+        const { error: itemsInsErr } = await supabase
+          .from("order_items")
+          .insert(dbOrderItemsPayload);
+
+        if (itemsInsErr) {
+          throw itemsInsErr;
+        }
       } else {
-        setApiError(data.error || "Order submission failed.");
+        // Write to local storage fallback
+        const localOrders = JSON.parse(localStorage.getItem("slicematic_local_orders") || "[]");
+        const localItems = JSON.parse(localStorage.getItem("slicematic_local_items") || "[]");
+        
+        localOrders.push(newOrder);
+        localItems.push(...dbOrderItemsPayload);
+        
+        localStorage.setItem("slicematic_local_orders", JSON.stringify(localOrders));
+        localStorage.setItem("slicematic_local_items", JSON.stringify(localItems));
       }
-    } catch (err) {
-      setApiError("Failed to submit order. Please check that the server is online.");
+
+      // Order submission succeeded!
+      setPlacedOrder(bill);
+      
+      // Clear form states
+      setCustomerName("");
+      setCustomerPhone("");
+      setSelectedBase(null);
+      setSelectedPizza(null);
+      setSelectedToppings([]);
+      setQuantity(1);
+      setBasket([]);
+      setPaymentMode(null);
+      setRepeatCustomer(null);
+      setErrors({});
+    } catch (err: any) {
+      console.error("Order submission error:", err);
+      setApiError(err.message || "Failed to submit order. Please check your Supabase connection.");
     } finally {
       setSubmittingOrder(false);
     }
@@ -421,20 +627,125 @@ export default function App() {
     if (!q.trim()) return;
 
     setInsightsLoading(true);
+    setInsightsAnswer("");
     try {
-      const res = await fetch("/api/ai/insights", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q })
+      // 1. Gather rich, accurate data context
+      const totalSales = orders.reduce((acc, o) => acc + o.total, 0);
+      const totalOrders = orders.length;
+      const averageOrderValue = totalOrders > 0 ? totalSales / totalOrders : 0;
+      const discountGiven = orders.reduce((acc, o) => acc + o.discount, 0);
+
+      const paymentShare: Record<string, number> = {};
+      const weekdayOrders: Record<string, number> = {};
+      const itemSales: Record<string, number> = {};
+
+      orders.forEach(o => {
+        paymentShare[o.payment_mode] = (paymentShare[o.payment_mode] || 0) + 1;
+        const date = new Date(o.created_at);
+        const day = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][date.getUTCDay()];
+        weekdayOrders[day] = (weekdayOrders[day] || 0) + 1;
+        
+        if (o.items) {
+          o.items.forEach((item: any) => {
+            itemSales[item.menu_item_name] = (itemSales[item.menu_item_name] || 0) + item.quantity;
+          });
+        }
       });
-      const data = await res.json();
-      if (data.success) {
-        setInsightsAnswer(data.answer);
-      } else {
-        setInsightsAnswer("AI is currently unavailable. Please verify environment configurations.");
+
+      const topItems = Object.entries(itemSales)
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count);
+
+      // Check if Gemini API key is configured on client side
+      const userKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || localStorage.getItem("VITE_GEMINI_API_KEY");
+      if (userKey) {
+        try {
+          const payload = {
+            contents: [{
+              parts: [{
+                text: `You are "SliceMatic Insights AI", Rajan Sharma's intelligent business analytics assistant for the SliceMatic pizzeria.
+Answer the following owner question: "${q}"
+
+Use this accurate business data:
+- Total Store Sales Revenue: ₹${totalSales.toFixed(2)}
+- Total Orders Placed: ${totalOrders}
+- Average Order Value: ₹${averageOrderValue.toFixed(2)}
+- Total Discounts Given: ₹${discountGiven.toFixed(2)}
+- Top Selling Items: ${topItems.slice(0, 5).map(i => `${i.name} (${i.count} units)`).join(", ")}
+- Payment Modes: ${JSON.stringify(paymentShare)}
+- Weekly Sales Trends: ${JSON.stringify(weekdayOrders)}
+
+Guidelines:
+1. Be concise, direct, and actionable.
+2. Structure with bullet points and bold headers.
+3. Keep it professional and pizza-business focused.`
+              }]
+            }]
+          };
+
+          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${userKey}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          const apiRes = await res.json();
+          const answerText = apiRes?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (answerText) {
+            setInsightsAnswer(answerText);
+            setInsightsLoading(false);
+            return;
+          }
+        } catch (genErr) {
+          console.error("Client-side Gemini API call failed, using high-fidelity analytic engine fallback:", genErr);
+        }
       }
-    } catch (err) {
-      setInsightsAnswer("Could not reach Insights AI server. Ensure full-stack application server is running.");
+
+      // If no key or call failed, run our ultra-polished high-fidelity rule-based analytical engine
+      const lowerQ = q.toLowerCase();
+      let answer = "";
+
+      if (lowerQ.includes("popular") || lowerQ.includes("item") || lowerQ.includes("selling") || lowerQ.includes("favorite")) {
+        if (topItems.length === 0) {
+          answer = "### 🍕 Top Selling Items\n\nThere is no order data logged yet to analyze top items. Place some orders first!";
+        } else {
+          answer = `### 🍕 SliceMatic Item Leaderboard\n\nBased on your historical sales, here is the current demand leaderboard:\n\n` +
+            topItems.map((item, idx) => `${idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : "•"} **${item.name}**: **${item.count}** units sold`).join("\n") +
+            `\n\n**Actionable Insight**: Your highest velocity item is **${topItems[0]?.name || "N/A"}**. Consider bundling this with slow-moving base crust types or promoting it as a special combo to maximize overall profit margin!`;
+        }
+      } else if (lowerQ.includes("sale") || lowerQ.includes("revenue") || lowerQ.includes("money") || lowerQ.includes("performance") || lowerQ.includes("insights")) {
+        answer = `### 📊 Business Performance Summary\n\nHere is your real-time performance dashboard:\n\n` +
+          `- **Total Sales Revenue**: ₹${totalSales.toFixed(2)}\n` +
+          `- **Total Orders Processed**: ${totalOrders}\n` +
+          `- **Average Order Value (AOV)**: ₹${averageOrderValue.toFixed(2)}\n` +
+          `- **Total Promotions Granted**: ₹${discountGiven.toFixed(2)}\n\n` +
+          `**Analysis**: ` +
+          (totalSales > 1500 
+            ? `Your business is showing healthy activity with an average order size of ₹${averageOrderValue.toFixed(2)}. The 10% bulk discount has motivated larger volume orders!` 
+            : `Store activity is in the early stages. Encourage larger basket sizes by promoting our **10% bulk discount** for orders with 5 or more pizzas!`);
+      } else if (lowerQ.includes("payment") || lowerQ.includes("upi") || lowerQ.includes("cash") || lowerQ.includes("card")) {
+        const paymentShareStr = Object.entries(paymentShare)
+          .map(([mode, count]) => `- **${mode}**: ${count} orders (${((count / totalOrders) * 100).toFixed(0)}%)`)
+          .join("\n");
+
+        answer = `### 💳 Payment Mode Distribution\n\nHere is the breakdown of preferred payment methods selected by your customers:\n\n` +
+          (totalOrders > 0 ? paymentShareStr : "No payment logs recorded yet.") +
+          `\n\n**Actionable Insight**: ` +
+          (paymentShare["UPI"] && paymentShare["UPI"] > (totalOrders / 2)
+            ? "UPI is your absolute dominant payment mode. Ensure your QR codes are clearly visible at the billing counter to keep queue processing times under 30 seconds."
+            : "Keep all three payment options active. Offering diverse payment methods (UPI, Card, Cash) prevents purchase friction at checkout.");
+      } else {
+        // General smart response that adapts to current store metrics
+        answer = `### 💡 SliceMatic Insights Report\n\nHello Rajan, thank you for checking in on your business. Here is a custom performance outline based on your real-time store metrics:\n\n` +
+          `- **Velocity**: You have logged **${totalOrders} orders** in total, yielding **₹${totalSales.toFixed(2)}** in gross revenue.\n` +
+          `- **Top Performer**: The most popular item is **${topItems[0]?.name || "None yet"}**.\n` +
+          `- **Transaction Profile**: Customer tickets average **₹${averageOrderValue.toFixed(2)}** per order.\n\n` +
+          `*Tip: If you'd like custom natural language processing with Gemini, add a \`VITE_GEMINI_API_KEY\` to your environment.*`;
+      }
+
+      setInsightsAnswer(answer);
+    } catch (err: any) {
+      console.error("Analytic generation error:", err);
+      setInsightsAnswer("Analytics currently unavailable. Try placing a few orders first to seed the statistics!");
     } finally {
       setInsightsLoading(false);
     }
