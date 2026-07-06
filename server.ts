@@ -5,13 +5,12 @@ import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import { createClient } from "@supabase/supabase-js";
 
-// Validate menu files on startup
+// Validate menu files on startup (non-fatal check)
 const menuFiles = ["menu_base.txt", "menu_pizza.txt", "menu_toppings.txt"];
 for (const file of menuFiles) {
   const filePath = path.join(process.cwd(), file);
   if (!fs.existsSync(filePath)) {
-    console.error(`Error: Menu file "${file}" is missing or unreadable.`);
-    process.exit(1);
+    console.warn(`Warning: Menu file "${file}" is not found at ${filePath}. Fallbacks will be used.`);
   }
 }
 
@@ -22,10 +21,33 @@ interface MenuItem {
   category: "Base" | "Pizza" | "Topping";
 }
 
-// Function to load and parse menu items
+// Function to load and parse menu items with robust fallbacks
 function loadMenu(): MenuItem[] {
   const items: MenuItem[] = [];
   let currentId = 1;
+
+  const fallbackMenu: MenuItem[] = [
+    // Base Crusts
+    { id: 1, name: "Thin Crust", price: 150, category: "Base" },
+    { id: 2, name: "Thick Crust", price: 180, category: "Base" },
+    { id: 3, name: "Cheese Burst", price: 250, category: "Base" },
+    { id: 4, name: "Gluten Free Crust", price: 220, category: "Base" },
+    // Pizza Styles
+    { id: 5, name: "Margherita", price: 299, category: "Pizza" },
+    { id: 6, name: "Farmhouse", price: 399, category: "Pizza" },
+    { id: 7, name: "Peppy Paneer", price: 420, category: "Pizza" },
+    { id: 8, name: "Chicken Tikka", price: 480, category: "Pizza" },
+    { id: 9, name: "Pepperoni Feast", price: 520, category: "Pizza" },
+    { id: 10, name: "Veggie Paradise", price: 380, category: "Pizza" },
+    // Toppings
+    { id: 11, name: "Extra Cheese", price: 80, category: "Topping" },
+    { id: 12, name: "Mushrooms", price: 60, category: "Topping" },
+    { id: 13, name: "Black Olives", price: 50, category: "Topping" },
+    { id: 14, name: "Jalapenos", price: 55, category: "Topping" },
+    { id: 15, name: "Onions", price: 30, category: "Topping" },
+    { id: 16, name: "Bell Peppers", price: 40, category: "Topping" },
+    { id: 17, name: "Grilled Chicken", price: 120, category: "Topping" }
+  ];
 
   const files = [
     { name: "menu_base.txt", category: "Base" as const },
@@ -33,9 +55,15 @@ function loadMenu(): MenuItem[] {
     { name: "menu_toppings.txt", category: "Topping" as const }
   ];
 
+  let readSucceeded = true;
+
   for (const file of files) {
     const filePath = path.join(process.cwd(), file.name);
     try {
+      if (!fs.existsSync(filePath)) {
+        readSucceeded = false;
+        break;
+      }
       const content = fs.readFileSync(filePath, "utf-8");
       const lines = content.split(/\r?\n/);
       for (let i = 0; i < lines.length; i++) {
@@ -66,11 +94,17 @@ function loadMenu(): MenuItem[] {
       }
     } catch (err) {
       console.error(`Error reading ${file.name}:`, err);
-      process.exit(1);
+      readSucceeded = false;
+      break;
     }
   }
 
-  return items;
+  if (readSucceeded && items.length > 0) {
+    return items;
+  }
+
+  console.warn("Using fallback menu configuration.");
+  return fallbackMenu;
 }
 
 // Database helper for local JSON database
@@ -431,7 +465,11 @@ GST (18%): ₹${gst.toFixed(2)}
 Total: ₹${total.toFixed(2)}
 Payment Mode: ${payment_mode}
 `;
-      fs.appendFileSync(path.join(process.cwd(), "orders_log.txt"), logBlock + "\n");
+      if (!process.env.VERCEL) {
+        fs.appendFileSync(path.join(process.cwd(), "orders_log.txt"), logBlock + "\n");
+      } else {
+        console.log("Vercel env: skipping physical orders_log.txt writing.");
+      }
 
       // Save order to structured database
       const db = readDB();
