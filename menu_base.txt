@@ -1,0 +1,4 @@
+Thin Crust,150
+Thick Crust,180
+Cheese Burst,250
+Gluten Free Crust,220

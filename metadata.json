@@ -1,0 +1,8 @@
+{
+  "name": "Remix: SliceMatic",
+  "description": "SliceMatic\u0027s high-reliability ordering system and AI sales analytics dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

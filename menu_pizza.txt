@@ -1,0 +1,6 @@
+Margherita,299
+Farmhouse,399
+Peppy Paneer,420
+Chicken Tikka,480
+Pepperoni Feast,520
+Veggie Paradise,380
