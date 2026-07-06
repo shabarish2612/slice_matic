@@ -94,6 +94,10 @@ interface DBStructure {
 function readDB(): DBStructure {
   try {
     if (!fs.existsSync(DB_PATH)) {
+      if (process.env.VERCEL) {
+        // Return empty structure on Vercel without attempting to write (read-only filesystem)
+        return { orders: [], order_items: [] };
+      }
       // Ensure directory and empty file
       fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
       const initialDB = { orders: [], order_items: [] };
@@ -110,6 +114,10 @@ function readDB(): DBStructure {
 
 function writeDB(data: DBStructure) {
   try {
+    if (process.env.VERCEL) {
+      console.warn("Skipping local JSON DB write on Vercel (read-only filesystem).");
+      return;
+    }
     fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
     fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), "utf-8");
   } catch (err) {
@@ -117,9 +125,8 @@ function writeDB(data: DBStructure) {
   }
 }
 
-async function startServer() {
-  const app = express();
-  app.use(express.json());
+const app = express();
+app.use(express.json());
 
   // API endpoints FIRST
 
@@ -623,24 +630,34 @@ ${recentOrders}
   });
 
   // Setup Vite development server or serve production build
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+  async function setupServer() {
+    if (process.env.NODE_ENV !== "production") {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+      
+      const PORT = 3000;
+      app.listen(PORT, "0.0.0.0", () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+      });
+    } else {
+      const distPath = path.join(process.cwd(), "dist");
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+      
+      if (!process.env.VERCEL) {
+        const PORT = 3000;
+        app.listen(PORT, "0.0.0.0", () => {
+          console.log(`Server running on http://localhost:${PORT}`);
+        });
+      }
+    }
   }
 
-  const PORT = 3000;
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
-}
+  setupServer();
 
-startServer();
+  export default app;
