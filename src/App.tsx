@@ -24,7 +24,12 @@ import {
   FileText,
   Send,
   MessageSquare,
-  Bot
+  Bot,
+  ChefHat,
+  Flame,
+  Timer,
+  Search,
+  RotateCw
 } from "lucide-react";
 
 interface MenuItem {
@@ -94,7 +99,7 @@ const DEFAULT_MENU: MenuItem[] = [
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"order" | "admin">("order");
+  const [activeTab, setActiveTab] = useState<"order" | "kitchen" | "admin">("order");
   const [menu, setMenu] = useState<MenuItem[]>(DEFAULT_MENU);
   const [orders, setOrders] = useState<Order[]>([]);
   const [basket, setBasket] = useState<BasketItem[]>([]);
@@ -142,6 +147,205 @@ export default function App() {
   // Pre-made recipe feedback message
   const [appliedRecipeMessage, setAppliedRecipeMessage] = useState<string | null>(null);
 
+  // Kitchen state to manage preparation and delivery status of orders and items
+  const [kitchenState, setKitchenState] = useState<Record<string, {
+    status: "queued" | "preparing" | "ready" | "delivered";
+    items: Record<string, "pending" | "preparing" | "done">;
+    updatedAt: string;
+  }>>(() => {
+    try {
+      const saved = localStorage.getItem("slicematic_kitchen_state");
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      console.error("Failed to parse kitchen state:", e);
+      return {};
+    }
+  });
+
+  // Persist kitchen state changes
+  useEffect(() => {
+    localStorage.setItem("slicematic_kitchen_state", JSON.stringify(kitchenState));
+  }, [kitchenState]);
+
+  // Sub-tabs & Search for Kitchen Live Board
+  const [kitchenSubTab, setKitchenSubTab] = useState<"active" | "completed">("active");
+  const [kitchenSearch, setKitchenSearch] = useState("");
+
+  const getPizzaCombos = (order: Order) => {
+    if (!order.items || order.items.length === 0) {
+      return [];
+    }
+
+    const combos: {
+      id: string;
+      baseName: string;
+      pizzaName: string;
+      toppings: string[];
+      quantity: number;
+    }[] = [];
+
+    const prefixGroups: Record<string, OrderItem[]> = {};
+    const fallbackItems: OrderItem[] = [];
+
+    order.items.forEach(item => {
+      const id = item.id || "";
+      const match = id.match(/^(oi-\d+-\d+)-(base|pizza|top)/);
+      if (match) {
+        const groupKey = match[1];
+        if (!prefixGroups[groupKey]) prefixGroups[groupKey] = [];
+        prefixGroups[groupKey].push(item);
+      } else {
+        fallbackItems.push(item);
+      }
+    });
+
+    // Group matching prefix items
+    Object.entries(prefixGroups).forEach(([key, group]) => {
+      const base = group.find(i => i.category === "Base");
+      const pizza = group.find(i => i.category === "Pizza");
+      const toppings = group.filter(i => i.category === "Topping");
+      
+      combos.push({
+        id: key,
+        baseName: base ? base.menu_item_name : "Thin Crust",
+        pizzaName: pizza ? pizza.menu_item_name : "Custom Pizza",
+        toppings: toppings.map(t => t.menu_item_name),
+        quantity: base?.quantity || pizza?.quantity || 1
+      });
+    });
+
+    // Handle any unmatched/unstructured items as a single pizza or fallback
+    if (fallbackItems.length > 0) {
+      const bases = fallbackItems.filter(i => i.category === "Base");
+      const pizzas = fallbackItems.filter(i => i.category === "Pizza");
+      const toppings = fallbackItems.filter(i => i.category === "Topping");
+
+      if (bases.length === 0 && pizzas.length === 0 && toppings.length > 0) {
+        combos.push({
+          id: `legacy-${order.id}-tops`,
+          baseName: "Standard Crust",
+          pizzaName: "Toppings Feast",
+          toppings: toppings.map(t => t.menu_item_name),
+          quantity: toppings[0].quantity || 1
+        });
+      } else if (bases.length === 1 && pizzas.length === 1) {
+        combos.push({
+          id: `legacy-${order.id}-0`,
+          baseName: bases[0].menu_item_name,
+          pizzaName: pizzas[0].menu_item_name,
+          toppings: toppings.map(t => t.menu_item_name),
+          quantity: bases[0].quantity || pizzas[0].quantity || 1
+        });
+      } else {
+        const minLen = Math.min(bases.length, pizzas.length);
+        if (minLen > 0) {
+          for (let i = 0; i < minLen; i++) {
+            combos.push({
+              id: `legacy-${order.id}-${i}`,
+              baseName: bases[i].menu_item_name,
+              pizzaName: pizzas[i].menu_item_name,
+              toppings: i === 0 ? toppings.map(t => t.menu_item_name) : [],
+              quantity: bases[i].quantity || pizzas[i].quantity || 1
+            });
+          }
+        } else {
+          pizzas.forEach((p, idx) => {
+            combos.push({
+              id: `legacy-${order.id}-p-${idx}`,
+              baseName: "Standard Crust",
+              pizzaName: p.menu_item_name,
+              toppings: idx === 0 ? toppings.map(t => t.menu_item_name) : [],
+              quantity: p.quantity || 1
+            });
+          });
+          bases.forEach((b, idx) => {
+            if (pizzas.length === 0) {
+              combos.push({
+                id: `legacy-${order.id}-b-${idx}`,
+                baseName: b.menu_item_name,
+                pizzaName: "Cheese Pizza",
+                toppings: [],
+                quantity: b.quantity || 1
+              });
+            }
+          });
+        }
+      }
+    }
+
+    return combos;
+  };
+
+  const updatePizzaItemStatus = (orderId: string, comboId: string, currentStatus: "pending" | "preparing" | "done") => {
+    const nextStatusMap: Record<string, "pending" | "preparing" | "done"> = {
+      "pending": "preparing",
+      "preparing": "done",
+      "done": "pending"
+    };
+    const nextStatus = nextStatusMap[currentStatus] || "pending";
+
+    setKitchenState(prev => {
+      const orderState = prev[orderId] || {
+        status: "queued",
+        items: {},
+        updatedAt: new Date().toISOString()
+      };
+
+      const updatedItems = {
+        ...orderState.items,
+        [comboId]: nextStatus
+      };
+
+      // Determine order status based on item statuses
+      let nextOrderStatus: "queued" | "preparing" | "ready" | "delivered" = "queued";
+      const itemStatuses = Object.values(updatedItems);
+      if (itemStatuses.every(s => s === "done")) {
+        nextOrderStatus = "ready";
+      } else if (itemStatuses.some(s => s === "preparing" || s === "done")) {
+        nextOrderStatus = "preparing";
+      }
+
+      return {
+        ...prev,
+        [orderId]: {
+          status: orderState.status === "delivered" ? "delivered" : nextOrderStatus,
+          items: updatedItems,
+          updatedAt: new Date().toISOString()
+        }
+      };
+    });
+  };
+
+  const updateOrderStatus = (orderId: string, nextStatus: "queued" | "preparing" | "ready" | "delivered") => {
+    setKitchenState(prev => {
+      const orderState = prev[orderId] || {
+        status: "queued",
+        items: {},
+        updatedAt: new Date().toISOString()
+      };
+
+      const updatedItems = { ...orderState.items };
+      if (nextStatus === "delivered" || nextStatus === "ready") {
+        const order = orders.find(o => o.id === orderId);
+        if (order) {
+          const combos = getPizzaCombos(order);
+          combos.forEach(c => {
+            updatedItems[c.id] = "done";
+          });
+        }
+      }
+
+      return {
+        ...prev,
+        [orderId]: {
+          status: nextStatus,
+          items: updatedItems,
+          updatedAt: new Date().toISOString()
+        }
+      };
+    });
+  };
+
   // AI Insights state
   const [insightsQuestion, setInsightsQuestion] = useState("");
   const [insightsLoading, setInsightsLoading] = useState(false);
@@ -174,9 +378,9 @@ export default function App() {
     fetchOrders();
   }, []);
 
-  // Fetch orders when switching to admin view
+  // Fetch orders when switching to admin or kitchen view
   useEffect(() => {
-    if (activeTab === "admin") {
+    if (activeTab === "admin" || activeTab === "kitchen") {
       fetchOrders();
     }
   }, [activeTab]);
@@ -1147,6 +1351,7 @@ export default function App() {
 
       // Order submission succeeded!
       setPlacedOrder(bill);
+      fetchOrders();
       
       // Clear form states
       setCustomerName("");
@@ -1354,6 +1559,17 @@ Guidelines:
             >
               <ShoppingBag className="w-4 h-4" />
               Order Intake Form
+            </button>
+            <button
+              onClick={() => setActiveTab("kitchen")}
+              className={`px-5 py-2.5 rounded-lg text-sm font-semibold transition-all flex items-center gap-2 ${
+                activeTab === "kitchen" 
+                  ? "bg-amber-500 text-slate-950 shadow-md" 
+                  : "text-slate-300 hover:text-white hover:bg-slate-800/50"
+              }`}
+            >
+              <ChefHat className="w-4 h-4" />
+              Kitchen Live Board
             </button>
             <button
               onClick={() => setActiveTab("admin")}
@@ -2135,6 +2351,415 @@ Guidelines:
 
           </div>
         )}
+
+        {/* TAB: KITCHEN LIVE BOARD */}
+        {activeTab === "kitchen" && (() => {
+          // Calculate kitchen stats dynamically based on fetched orders and kitchenState
+          const activeOrders = orders.filter(o => kitchenState[o.id]?.status !== "delivered");
+          const completedOrders = orders.filter(o => kitchenState[o.id]?.status === "delivered");
+          
+          let activePizzasCount = 0;
+          activeOrders.forEach(o => {
+            const combos = getPizzaCombos(o);
+            combos.forEach(c => {
+              const itemStatus = kitchenState[o.id]?.items?.[c.id] || "pending";
+              if (itemStatus !== "done") {
+                activePizzasCount += c.quantity;
+              }
+            });
+          });
+
+          const activeOrdersCount = activeOrders.length;
+          const deliveredOrdersCount = completedOrders.length;
+
+          // Search + Tab filter list of orders
+          const filteredKitchenOrders = orders.filter(order => {
+            const status = kitchenState[order.id]?.status || "queued";
+            const isCorrectTab = kitchenSubTab === "active" ? status !== "delivered" : status === "delivered";
+            
+            const sText = kitchenSearch.trim().toLowerCase();
+            if (!sText) return isCorrectTab;
+            
+            return isCorrectTab && (
+              order.customer_name.toLowerCase().includes(sText) ||
+              order.phone.includes(sText) ||
+              order.id.toLowerCase().includes(sText)
+            );
+          }).sort((a, b) => {
+            const dateA = new Date(a.created_at).getTime();
+            const dateB = new Date(b.created_at).getTime();
+            return kitchenSubTab === "active" ? dateA - dateB : dateB - dateA; // active first-in first-out (FIFO), completed reverse-chronological
+          });
+
+          const getRelativeTime = (isoString: string) => {
+            const diffMs = Date.now() - new Date(isoString).getTime();
+            const diffMins = Math.floor(diffMs / 60000);
+            if (diffMins < 1) return "Just now";
+            if (diffMins === 1) return "1 min ago";
+            if (diffMins < 60) return `${diffMins} mins ago`;
+            const diffHrs = Math.floor(diffMins / 60);
+            return `${diffHrs}h ${diffMins % 60}m ago`;
+          };
+
+          return (
+            <div className="space-y-6 animate-fade-in text-slate-800">
+              
+              {/* KITCHEN HEADER */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs">
+                <div className="flex items-center gap-3 text-left">
+                  <div className="bg-amber-500 text-slate-950 p-3 rounded-2xl shadow-md">
+                    <ChefHat className="w-7 h-7" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold font-display text-slate-900">Kitchen Live Order Board</h2>
+                    <p className="text-xs text-slate-500">Real-time baking tickets, toppings prep, and rapid dispatcher dispatching.</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => fetchOrders()}
+                    disabled={loadingOrders}
+                    className="bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-extrabold text-xs px-4 py-3 rounded-2xl shadow-md transition-all flex items-center gap-2 cursor-pointer"
+                  >
+                    <RotateCw className={`w-3.5 h-3.5 ${loadingOrders ? "animate-spin" : ""}`} />
+                    Sync Kitchen Board
+                  </button>
+                </div>
+              </div>
+
+              {/* KITCHEN STATS */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Stat 1 */}
+                <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs flex items-center gap-4 text-left">
+                  <div className="bg-amber-500/10 text-amber-600 p-3 rounded-2xl shrink-0">
+                    <Timer className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-slate-400 font-extrabold uppercase tracking-wider">Active Tickets</p>
+                    <h3 className="text-2xl font-black font-mono text-slate-800 mt-0.5">{activeOrdersCount}</h3>
+                    <p className="text-slate-500 text-[11px] font-semibold">Orders currently queued</p>
+                  </div>
+                </div>
+
+                {/* Stat 2 */}
+                <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs flex items-center gap-4 text-left">
+                  <div className="bg-amber-500/10 text-amber-600 p-3 rounded-2xl shrink-0">
+                    <Flame className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-slate-400 font-extrabold uppercase tracking-wider">Pizzas to Bake</p>
+                    <h3 className="text-2xl font-black font-mono text-slate-800 mt-0.5">{activePizzasCount}</h3>
+                    <p className="text-slate-500 text-[11px] font-semibold">Individual pizzas in oven / queue</p>
+                  </div>
+                </div>
+
+                {/* Stat 3 */}
+                <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs flex items-center gap-4 text-left">
+                  <div className="bg-emerald-500/10 text-emerald-600 p-3 rounded-2xl shrink-0">
+                    <Check className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-slate-400 font-extrabold uppercase tracking-wider">Delivered Today</p>
+                    <h3 className="text-2xl font-black font-mono text-slate-800 mt-0.5">{deliveredOrdersCount}</h3>
+                    <p className="text-slate-500 text-[11px] font-semibold">Orders dispatched successfully</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* BOARD SUBNAV & SEARCH */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-4 rounded-3xl border border-slate-200/80 shadow-xs">
+                {/* Tabs */}
+                <div className="flex gap-1.5 p-1 bg-slate-100 rounded-2xl self-start">
+                  <button
+                    onClick={() => setKitchenSubTab("active")}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold transition-all uppercase tracking-wider flex items-center gap-1.5 cursor-pointer ${
+                      kitchenSubTab === "active"
+                        ? "bg-slate-900 text-white shadow-xs"
+                        : "text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    <Flame className="w-3.5 h-3.5" />
+                    Active Queue ({activeOrdersCount})
+                  </button>
+                  <button
+                    onClick={() => setKitchenSubTab("completed")}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold transition-all uppercase tracking-wider flex items-center gap-1.5 cursor-pointer ${
+                      kitchenSubTab === "completed"
+                        ? "bg-slate-900 text-white shadow-xs"
+                        : "text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    Delivered & Dispatched ({deliveredOrdersCount})
+                  </button>
+                </div>
+
+                {/* Search */}
+                <div className="relative flex-grow max-w-sm">
+                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search by customer name, phone, order ID..."
+                    value={kitchenSearch}
+                    onChange={(e) => setKitchenSearch(e.target.value)}
+                    className="w-full bg-slate-50 hover:bg-slate-100/60 border border-slate-200/80 rounded-2xl pl-10 pr-4 py-2.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:border-amber-500 transition-colors focus:ring-2 focus:ring-amber-500/10 font-medium"
+                  />
+                  {kitchenSearch && (
+                    <button 
+                      onClick={() => setKitchenSearch("")} 
+                      className="absolute right-3.5 top-1/2 -translate-y-1/2 text-[10px] font-extrabold text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* TICKET DECK GRID */}
+              {loadingOrders ? (
+                <div className="bg-white p-12 rounded-3xl border border-slate-200/80 shadow-xs text-center space-y-3">
+                  <Loader2 className="w-8 h-8 animate-spin text-amber-500 mx-auto" />
+                  <p className="text-sm font-semibold text-slate-500">Retrieving kitchen tickets...</p>
+                </div>
+              ) : filteredKitchenOrders.length === 0 ? (
+                <div className="bg-white py-16 px-6 rounded-3xl border border-slate-200/80 shadow-xs text-center max-w-xl mx-auto space-y-4">
+                  <div className="bg-amber-500/10 text-amber-600 p-4 rounded-full w-14 h-14 flex items-center justify-center mx-auto shadow-inner">
+                    <ChefHat className="w-8 h-8" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <h3 className="font-bold text-base font-display text-slate-800">
+                      {kitchenSearch ? "No matching tickets found" : "All quiet in the kitchen!"}
+                    </h3>
+                    <p className="text-xs text-slate-500 leading-relaxed max-w-sm mx-auto">
+                      {kitchenSearch 
+                        ? "Double check your spelling or search terms to find specific order files."
+                        : "No active pizza recipes are waiting for baking right now. Good job!"}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                  {filteredKitchenOrders.map((order, orderIdx) => {
+                    const combos = getPizzaCombos(order);
+                    const orderState = kitchenState[order.id] || {
+                      status: "queued",
+                      items: {},
+                      updatedAt: order.created_at
+                    };
+
+                    const isFullyCompleted = combos.every(c => orderState.items[c.id] === "done");
+                    const isAnyPreparing = combos.some(c => orderState.items[c.id] === "preparing");
+
+                    // Derived visual statuses
+                    let statusLabel = "Queued";
+                    let statusColorClass = "bg-amber-100 text-amber-700 border-amber-200";
+                    if (orderState.status === "delivered") {
+                      statusLabel = "Delivered";
+                      statusColorClass = "bg-emerald-100 text-emerald-700 border-emerald-200";
+                    } else if (isFullyCompleted) {
+                      statusLabel = "Ready to Dispatch";
+                      statusColorClass = "bg-green-100 text-green-700 border-green-200";
+                    } else if (isAnyPreparing) {
+                      statusLabel = "Baking / Prep";
+                      statusColorClass = "bg-blue-100 text-blue-700 border-blue-200";
+                    }
+
+                    return (
+                      <div 
+                        key={order.id}
+                        className={`bg-white border border-slate-200 rounded-3xl shadow-xs flex flex-col justify-between hover:shadow-md transition-all duration-200 relative overflow-hidden ${
+                          orderState.status === "delivered" 
+                            ? "opacity-85 border-slate-200" 
+                            : isFullyCompleted 
+                              ? "ring-2 ring-emerald-500 border-emerald-300 shadow-lg shadow-emerald-500/5 bg-emerald-50/[0.01]" 
+                              : isAnyPreparing 
+                                ? "ring-2 ring-blue-500/30 border-blue-300"
+                                : ""
+                        }`}
+                      >
+                        {/* Upper highlight bar based on status */}
+                        <div className={`h-1.5 w-full absolute top-0 left-0 ${
+                          orderState.status === "delivered"
+                            ? "bg-slate-300"
+                            : isFullyCompleted
+                              ? "bg-emerald-500"
+                              : isAnyPreparing
+                                ? "bg-blue-500"
+                                : "bg-amber-500"
+                        }`} />
+
+                        <div className="p-5 space-y-4 text-left">
+                          
+                          {/* Card header */}
+                          <div className="flex items-start justify-between gap-2 pt-1.5">
+                            <div>
+                              <span className="text-[10px] font-mono font-black text-slate-400 uppercase tracking-wider block">
+                                Ticket ID
+                              </span>
+                              <span className="text-xs font-mono font-bold text-slate-800 bg-slate-100 px-2 py-0.5 rounded-md mt-0.5 inline-block">
+                                #{order.id.slice(4, 10).toUpperCase()}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-col items-end gap-1">
+                              <span className={`text-[9px] font-extrabold uppercase px-2 py-0.5 rounded-full border tracking-wide ${statusColorClass}`}>
+                                {statusLabel}
+                              </span>
+                              <span className="text-[10px] font-medium text-slate-400 flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                {getRelativeTime(order.created_at)}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Customer summary */}
+                          <div className="space-y-0.5 pt-0.5">
+                            <h4 className="font-extrabold text-sm text-slate-800 flex items-center gap-1.5">
+                              <User className="w-4 h-4 text-slate-400 shrink-0" />
+                              {order.customer_name}
+                            </h4>
+                            <p className="text-[10px] font-mono text-slate-500 pl-5">
+                              📞 {order.phone}
+                            </p>
+                          </div>
+
+                          <div className="border-t border-dashed border-slate-200 my-1" />
+
+                          {/* Pizzas Combos list */}
+                          <div className="space-y-3.5">
+                            <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">
+                              Pizza Items ({combos.reduce((a, c) => a + c.quantity, 0)})
+                            </h5>
+                            
+                            <div className="space-y-3">
+                              {combos.map((combo, comboIdx) => {
+                                const currentItemStatus = orderState.items[combo.id] || "pending";
+                                return (
+                                  <div 
+                                    key={combo.id || comboIdx}
+                                    className={`p-3 rounded-2xl border transition-all ${
+                                      currentItemStatus === "done"
+                                        ? "bg-green-50/40 border-green-200/60"
+                                        : currentItemStatus === "preparing"
+                                          ? "bg-blue-50/40 border-blue-200/60"
+                                          : "bg-slate-50 border-slate-200/60"
+                                    }`}
+                                  >
+                                    <div className="flex items-start justify-between gap-1.5">
+                                      <div className="space-y-1 flex-grow">
+                                        <div className="flex items-baseline gap-1.5">
+                                          <span className="text-xs bg-slate-900 text-white font-mono font-black rounded-lg px-2 py-0.5 scale-90 inline-block">
+                                            x{combo.quantity}
+                                          </span>
+                                          <span className="font-bold text-xs text-slate-850">
+                                            {combo.pizzaName}
+                                          </span>
+                                        </div>
+                                        
+                                        <div className="text-[10px] text-slate-500 font-semibold pl-2 space-y-0.5">
+                                          <p>• {combo.baseName} Crust</p>
+                                          {combo.toppings.length > 0 && (
+                                            <p className="text-amber-700/90 truncate max-w-[160px]" title={combo.toppings.join(", ")}>
+                                              • Tops: {combo.toppings.join(", ")}
+                                            </p>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {/* Interactive Action Badges */}
+                                      {orderState.status !== "delivered" && (
+                                        <button
+                                          type="button"
+                                          onClick={() => updatePizzaItemStatus(order.id, combo.id, currentItemStatus)}
+                                          className={`text-[9px] font-extrabold uppercase tracking-wider py-1.5 px-2.5 rounded-xl border transition-all duration-150 cursor-pointer self-center shrink-0 active:scale-95 ${
+                                            currentItemStatus === "done"
+                                              ? "bg-green-500 border-green-500 text-white hover:bg-green-600 shadow-inner"
+                                              : currentItemStatus === "preparing"
+                                                ? "bg-blue-500 border-blue-500 text-white hover:bg-blue-600 animate-pulse"
+                                                : "bg-amber-100 hover:bg-amber-200 text-amber-800 border-amber-300"
+                                          }`}
+                                        >
+                                          {currentItemStatus === "done" ? (
+                                            <span className="flex items-center gap-1 font-extrabold">Bake Done ✓</span>
+                                          ) : currentItemStatus === "preparing" ? (
+                                            <span className="flex items-center gap-1 font-extrabold">In Oven ⏳</span>
+                                          ) : (
+                                            <span className="font-extrabold">Queued ⊞</span>
+                                          )}
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                        </div>
+
+                        {/* Card bottom actions */}
+                        <div className="p-4 bg-slate-50/50 border-t border-slate-100 rounded-b-3xl">
+                          {orderState.status === "delivered" ? (
+                            <button
+                              type="button"
+                              onClick={() => updateOrderStatus(order.id, "queued")}
+                              className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white font-extrabold text-[10px] uppercase py-2.5 rounded-xl border border-slate-700 transition-colors cursor-pointer"
+                            >
+                              Send Back to Kitchen Prep
+                            </button>
+                          ) : (
+                            <div className="flex flex-col gap-2">
+                              {/* Quick Mark All Ready Option if not fully completed */}
+                              {!isFullyCompleted && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    // Mark all items as done
+                                    combos.forEach(c => {
+                                      setKitchenState(prev => {
+                                        const os = prev[order.id] || { status: "queued", items: {}, updatedAt: "" };
+                                        return {
+                                          ...prev,
+                                          [order.id]: {
+                                            status: "ready",
+                                            items: { ...os.items, [c.id]: "done" },
+                                            updatedAt: new Date().toISOString()
+                                          }
+                                        };
+                                      });
+                                    });
+                                  }}
+                                  className="text-[9px] font-bold text-slate-500 hover:text-amber-600 transition-colors text-center cursor-pointer"
+                                >
+                                  ⚡ Mark All Items Cooked
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={() => updateOrderStatus(order.id, "delivered")}
+                                className={`w-full font-black text-[11px] uppercase py-3 rounded-xl tracking-wider transition-all duration-200 active:scale-95 cursor-pointer shadow-xs ${
+                                  isFullyCompleted
+                                    ? "bg-green-600 hover:bg-green-500 text-white hover:shadow-md hover:shadow-green-500/10"
+                                    : "bg-amber-500 hover:bg-amber-400 text-slate-950"
+                                }`}
+                              >
+                                {isFullyCompleted ? "Dispatch & Deliver Order" : "Force Deliver Order"}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+            </div>
+          );
+        })()}
 
         {/* TAB 2: ADMIN & AI INSIGHTS */}
         {activeTab === "admin" && (
