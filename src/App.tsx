@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { getSupabaseClient, isSupabaseConfigured, getSupabaseUrl, getSupabasePublishableKey, resetSupabaseClient } from "./lib/supabase";
 import { 
   Pizza, 
@@ -19,7 +19,12 @@ import {
   Calendar,
   Clock,
   ArrowRight,
-  Settings
+  Settings,
+  Upload,
+  FileText,
+  Send,
+  MessageSquare,
+  Bot
 } from "lucide-react";
 
 interface MenuItem {
@@ -136,8 +141,22 @@ export default function App() {
 
   // AI Insights state
   const [insightsQuestion, setInsightsQuestion] = useState("");
-  const [insightsAnswer, setInsightsAnswer] = useState("");
   const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsChatHistory, setInsightsChatHistory] = useState<{ sender: "user" | "bot"; text: string; timestamp: Date }[]>([
+    {
+      sender: "bot",
+      text: `### 🍕 Welcome to SliceMatic Insights AI!\n\nI am your intelligent business analytics assistant. Ask me anything about your pizzeria's sales, popular toppings, busy days, or transaction metrics!\n\nYou can also click any of the suggested questions below to get started.`,
+      timestamp: new Date()
+    }
+  ]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll chat to bottom
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [insightsChatHistory, insightsLoading]);
 
   // General loading & error states
   const [loadingMenu, setLoadingMenu] = useState(true);
@@ -168,17 +187,295 @@ export default function App() {
     }
   }, [customerPhone]);
 
+  const [baseNumberInput, setBaseNumberInput] = useState("");
+  const [pizzaNumberInput, setPizzaNumberInput] = useState("");
+  const [toppingsNumberInput, setToppingsNumberInput] = useState("");
+  const [menuUploadLogs, setMenuUploadLogs] = useState<string[]>([]);
+
+  // Parse raw menu text contents client-side
+  const parseMenuFromRawText = (baseText: string, pizzaText: string, toppingsText: string): MenuItem[] => {
+    const items: MenuItem[] = [];
+    let currentId = 1;
+
+    const categories = [
+      { content: baseText, catName: "Base" as const },
+      { content: pizzaText, catName: "Pizza" as const },
+      { content: toppingsText, catName: "Topping" as const }
+    ];
+
+    for (const cat of categories) {
+      const lines = cat.content.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        const parts = line.split(",");
+        if (parts.length < 2) continue;
+
+        const name = parts[0].trim();
+        const price = parseFloat(parts[1].trim());
+
+        if (!name || isNaN(price)) continue;
+
+        items.push({
+          id: currentId++,
+          name,
+          price,
+          category: cat.catName
+        });
+      }
+    }
+    return items;
+  };
+
   const fetchMenu = async () => {
     setLoadingMenu(true);
     setApiError(null);
     try {
-      // Menu is statically pre-loaded, ensuring 100% availability
-      setMenu(DEFAULT_MENU);
+      const res = await fetch("/api/menu");
+      const data = await res.json();
+      if (data.success && data.menu && data.menu.length > 0) {
+        setMenu(data.menu);
+      } else {
+        const savedBase = localStorage.getItem("menu_base.txt");
+        const savedPizza = localStorage.getItem("menu_pizza.txt");
+        const savedToppings = localStorage.getItem("menu_toppings.txt");
+        if (savedBase && savedPizza && savedToppings) {
+          const parsed = parseMenuFromRawText(savedBase, savedPizza, savedToppings);
+          if (parsed.length > 0) {
+            setMenu(parsed);
+            return;
+          }
+        }
+        setMenu(DEFAULT_MENU);
+      }
     } catch (err) {
-      setApiError("Failed to load menu items.");
+      console.error("Failed to load menu from API, trying localStorage or default:", err);
+      const savedBase = localStorage.getItem("menu_base.txt");
+      const savedPizza = localStorage.getItem("menu_pizza.txt");
+      const savedToppings = localStorage.getItem("menu_toppings.txt");
+      if (savedBase && savedPizza && savedToppings) {
+        const parsed = parseMenuFromRawText(savedBase, savedPizza, savedToppings);
+        if (parsed.length > 0) {
+          setMenu(parsed);
+          return;
+        }
+      }
+      setMenu(DEFAULT_MENU);
     } finally {
       setLoadingMenu(false);
     }
+  };
+
+  const handleBaseNumberChange = (value: string) => {
+    setBaseNumberInput(value);
+    setSelectedBase(null);
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setErrors(prev => ({ ...prev, baseInput: "Base selection cannot be empty." }));
+      return;
+    }
+
+    if (!/^\d+$/.test(trimmed)) {
+      setErrors(prev => ({ ...prev, baseInput: "Selection must be a valid item number (e.g. 1), not letters or words." }));
+      return;
+    }
+
+    const num = parseInt(trimmed, 10);
+    const bases = menu.filter(m => m.category === "Base");
+    const validIds = bases.map(b => b.id);
+    const minId = Math.min(...validIds);
+    const maxId = Math.max(...validIds);
+
+    const priceMatchedBase = bases.find(b => b.price === num);
+    if (priceMatchedBase) {
+      setErrors(prev => ({ 
+        ...prev, 
+        baseInput: `Warning: You typed a price (₹${num}) instead of the item number. Did you mean item number ${priceMatchedBase.id}?` 
+      }));
+      return;
+    }
+
+    if (!validIds.includes(num)) {
+      setErrors(prev => ({ ...prev, baseInput: `Invalid item number. Please select between ${minId} and ${maxId}.` }));
+      return;
+    }
+
+    setSelectedBase(num);
+    setErrors(prev => {
+      const copy = { ...prev };
+      delete copy.baseInput;
+      delete copy.selectedBase;
+      return copy;
+    });
+  };
+
+  const handlePizzaNumberChange = (value: string) => {
+    setPizzaNumberInput(value);
+    setSelectedPizza(null);
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setErrors(prev => ({ ...prev, pizzaInput: "Pizza selection cannot be empty." }));
+      return;
+    }
+
+    if (!/^\d+$/.test(trimmed)) {
+      setErrors(prev => ({ ...prev, pizzaInput: "Selection must be a valid item number (e.g. 5), not letters or words." }));
+      return;
+    }
+
+    const num = parseInt(trimmed, 10);
+    const pizzas = menu.filter(m => m.category === "Pizza");
+    const validIds = pizzas.map(p => p.id);
+    const minId = Math.min(...validIds);
+    const maxId = Math.max(...validIds);
+
+    const priceMatchedPizza = pizzas.find(p => p.price === num);
+    if (priceMatchedPizza) {
+      setErrors(prev => ({ 
+        ...prev, 
+        pizzaInput: `Warning: You typed a price (₹${num}) instead of the item number. Did you mean item number ${priceMatchedPizza.id}?` 
+      }));
+      return;
+    }
+
+    if (!validIds.includes(num)) {
+      setErrors(prev => ({ ...prev, pizzaInput: `Invalid item number. Please select between ${minId} and ${maxId}.` }));
+      return;
+    }
+
+    setSelectedPizza(num);
+    setErrors(prev => {
+      const copy = { ...prev };
+      delete copy.pizzaInput;
+      delete copy.selectedPizza;
+      return copy;
+    });
+  };
+
+  const handleToppingsNumberChange = (value: string) => {
+    setToppingsNumberInput(value);
+    setSelectedToppings([]);
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setErrors(prev => {
+        const copy = { ...prev };
+        delete copy.toppingsInput;
+        return copy;
+      });
+      return;
+    }
+
+    const parts = trimmed.split(",").map(p => p.trim());
+    const selectedIds: number[] = [];
+    const toppings = menu.filter(m => m.category === "Topping");
+    const validIds = toppings.map(t => t.id);
+    const minId = Math.min(...validIds);
+    const maxId = Math.max(...validIds);
+
+    for (const part of parts) {
+      if (!part) continue;
+
+      if (!/^\d+$/.test(part)) {
+        setErrors(prev => ({ ...prev, toppingsInput: "Toppings must be comma-separated item numbers (e.g., 11, 13)." }));
+        return;
+      }
+
+      const num = parseInt(part, 10);
+
+      const priceMatchedTopping = toppings.find(t => t.price === num);
+      if (priceMatchedTopping) {
+        setErrors(prev => ({ 
+          ...prev, 
+          toppingsInput: `Warning: You typed a topping price (₹${num}) instead of the item number. Did you mean topping item number ${priceMatchedTopping.id}?` 
+        }));
+        return;
+      }
+
+      if (!validIds.includes(num)) {
+        setErrors(prev => ({ ...prev, toppingsInput: `Invalid topping number "${part}". Please select toppings between ${minId} and ${maxId}.` }));
+        return;
+      }
+
+      selectedIds.push(num);
+    }
+
+    setSelectedToppings(selectedIds);
+    setErrors(prev => {
+      const copy = { ...prev };
+      delete copy.toppingsInput;
+      return copy;
+    });
+  };
+
+  const handleMenuFileUpload = (filename: string, file: File) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const content = e.target?.result as string;
+      if (typeof content !== "string") return;
+
+      const logs: string[] = [];
+      const lines = content.split(/\r?\n/);
+      let parsedCount = 0;
+      let skippedCount = 0;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        const parts = line.split(",");
+        if (parts.length < 2) {
+          logs.push(`Warning: Malformed line ${i + 1} in ${filename} - missing price field: "${line}"`);
+          skippedCount++;
+          continue;
+        }
+
+        const name = parts[0].trim();
+        const priceStr = parts[1].trim();
+        const price = parseFloat(priceStr);
+
+        if (!name || isNaN(price)) {
+          logs.push(`Warning: Malformed line ${i + 1} in ${filename} - invalid name or price: "${line}"`);
+          skippedCount++;
+          continue;
+        }
+
+        parsedCount++;
+      }
+
+      logs.push(`Success: Parsed ${parsedCount} items from ${filename} successfully. Skipped ${skippedCount} malformed lines.`);
+      setMenuUploadLogs(logs);
+
+      // Store content in localStorage so Vercel can reload it
+      localStorage.setItem(filename, content);
+
+      try {
+        const res = await fetch("/api/upload-menu", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename, content })
+        });
+        const data = await res.json();
+        if (data.success) {
+          logs.push(`Backend Reload: Dynamic reload successful. Active menu updated on server.`);
+          setMenu(data.menu);
+        } else {
+          logs.push(`Error: Failed to upload file to backend server: ${data.error}`);
+        }
+      } catch (err: any) {
+        logs.push(`Note: Server filesystem is offline/read-only on Vercel. Saved menu file to browser localStorage.`);
+        // Reload menu from local storage files
+        const savedBase = localStorage.getItem("menu_base.txt") || "";
+        const savedPizza = localStorage.getItem("menu_pizza.txt") || "";
+        const savedToppings = localStorage.getItem("menu_toppings.txt") || "";
+        const parsed = parseMenuFromRawText(savedBase, savedPizza, savedToppings);
+        if (parsed.length > 0) {
+          setMenu(parsed);
+        }
+      }
+      setMenuUploadLogs([...logs]);
+    };
+    reader.readAsText(file);
   };
 
   const fetchOrders = async () => {
@@ -454,9 +751,15 @@ export default function App() {
     setSelectedBase(null);
     setSelectedPizza(null);
     setSelectedToppings([]);
+    setBaseNumberInput("");
+    setPizzaNumberInput("");
+    setToppingsNumberInput("");
     setQuantity(1);
     setErrors(prev => {
       const updated = { ...prev };
+      delete updated.baseInput;
+      delete updated.pizzaInput;
+      delete updated.toppingsInput;
       delete updated.selectedBase;
       delete updated.selectedPizza;
       return updated;
@@ -626,8 +929,12 @@ export default function App() {
     const q = presetQuestion || insightsQuestion;
     if (!q.trim()) return;
 
+    // Append user message immediately and clear the input box
+    const userMsg = { sender: "user" as const, text: q, timestamp: new Date() };
+    setInsightsChatHistory(prev => [...prev, userMsg]);
+    setInsightsQuestion("");
+
     setInsightsLoading(true);
-    setInsightsAnswer("");
     try {
       // 1. Gather rich, accurate data context
       const totalSales = orders.reduce((acc, o) => acc + o.total, 0);
@@ -656,7 +963,26 @@ export default function App() {
         .map(([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count);
 
-      // Check if Gemini API key is configured on client side
+      // Try server-side API endpoint first (highly secure, leverages server API key)
+      try {
+        const res = await fetch("/api/ai/insights", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: q })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.success && data.answer && !data.answer.includes("Insights are currently unavailable")) {
+            setInsightsChatHistory(prev => [...prev, { sender: "bot", text: data.answer, timestamp: new Date() }]);
+            setInsightsLoading(false);
+            return;
+          }
+        }
+      } catch (serverErr) {
+        console.error("Server-side Gemini API call failed or unavailable, falling back:", serverErr);
+      }
+
+      // Check if Gemini API key is configured on client side as a secondary option
       const userKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || localStorage.getItem("VITE_GEMINI_API_KEY");
       if (userKey) {
         try {
@@ -691,7 +1017,7 @@ Guidelines:
           const apiRes = await res.json();
           const answerText = apiRes?.candidates?.[0]?.content?.parts?.[0]?.text;
           if (answerText) {
-            setInsightsAnswer(answerText);
+            setInsightsChatHistory(prev => [...prev, { sender: "bot", text: answerText, timestamp: new Date() }]);
             setInsightsLoading(false);
             return;
           }
@@ -739,13 +1065,13 @@ Guidelines:
           `- **Velocity**: You have logged **${totalOrders} orders** in total, yielding **₹${totalSales.toFixed(2)}** in gross revenue.\n` +
           `- **Top Performer**: The most popular item is **${topItems[0]?.name || "None yet"}**.\n` +
           `- **Transaction Profile**: Customer tickets average **₹${averageOrderValue.toFixed(2)}** per order.\n\n` +
-          `*Tip: If you'd like custom natural language processing with Gemini, add a \`VITE_GEMINI_API_KEY\` to your environment.*`;
+          `*Tip: If you'd like custom natural language processing with Gemini, make sure your GEMINI_API_KEY is configured in your environments/secrets.*`;
       }
 
-      setInsightsAnswer(answer);
+      setInsightsChatHistory(prev => [...prev, { sender: "bot", text: answer, timestamp: new Date() }]);
     } catch (err: any) {
       console.error("Analytic generation error:", err);
-      setInsightsAnswer("Analytics currently unavailable. Try placing a few orders first to seed the statistics!");
+      setInsightsChatHistory(prev => [...prev, { sender: "bot", text: "Analytics currently unavailable. Try placing a few orders first to seed the statistics!", timestamp: new Date() }]);
     } finally {
       setInsightsLoading(false);
     }
@@ -1021,7 +1347,7 @@ Guidelines:
                     <span className="text-slate-500 text-sm font-medium">Reading menu text files...</span>
                   </div>
                 ) : (
-                  <div className="space-y-6">
+                  <div className="space-y-6 text-left">
                     
                     {/* CATEGORY 1: CRUST BASES */}
                     <div className="space-y-3">
@@ -1033,7 +1359,14 @@ Guidelines:
                         {menu.filter(m => m.category === "Base").map(b => (
                           <div 
                             key={b.id}
-                            onClick={() => setSelectedBase(b.id)}
+                            onClick={() => {
+                              setSelectedBase(b.id);
+                              setErrors(prev => {
+                                const copy = { ...prev };
+                                delete copy.selectedBase;
+                                return copy;
+                              });
+                            }}
                             className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex justify-between items-center ${
                               selectedBase === b.id 
                                 ? "border-amber-500 bg-amber-50/40 shadow-sm" 
@@ -1062,7 +1395,14 @@ Guidelines:
                         {menu.filter(m => m.category === "Pizza").map(p => (
                           <div 
                             key={p.id}
-                            onClick={() => setSelectedPizza(p.id)}
+                            onClick={() => {
+                              setSelectedPizza(p.id);
+                              setErrors(prev => {
+                                const copy = { ...prev };
+                                delete copy.selectedPizza;
+                                return copy;
+                              });
+                            }}
                             className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex justify-between items-center ${
                               selectedPizza === p.id 
                                 ? "border-amber-500 bg-amber-50/40 shadow-sm" 
@@ -1677,84 +2017,246 @@ Guidelines:
             </div>
 
             {/* AI DEMAND ASSISTANT PANEL */}
-            <div className="bg-slate-900 text-slate-100 rounded-2xl p-6 shadow-xl border border-slate-800 space-y-6">
-              <div className="flex items-center gap-2.5 border-b border-slate-800 pb-4">
-                <div className="bg-amber-500/10 text-amber-500 p-2 rounded-lg">
-                  <Sparkles className="w-5 h-5" />
+            <div className="bg-slate-900 text-slate-100 rounded-2xl p-6 shadow-xl border border-slate-800 space-y-5 text-left">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="bg-amber-500/10 text-amber-500 p-2 rounded-lg">
+                    <Sparkles className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base font-display text-slate-100">SliceMatic Insights AI Analyst</h3>
+                    <p className="text-slate-400 text-xs">Conversational intelligence for pizzeria metrics & sales statistics</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="font-bold text-lg font-display text-slate-100">SliceMatic Insights AI Assistant</h3>
-                  <p className="text-slate-400 text-xs">Plain-English Sales, Demand, and Operational analytics for Rajan Sharma</p>
+
+                {/* Pulse online status indicator */}
+                <div className="flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full shrink-0">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </span>
+                  <span className="text-[10px] text-emerald-400 font-extrabold uppercase tracking-wider">Analyst Online</span>
                 </div>
               </div>
 
+              {/* Chat bot conversation area */}
               <div className="space-y-4">
-                <div className="flex flex-col md:flex-row gap-2">
-                  <input 
-                    type="text" 
-                    value={insightsQuestion}
-                    onChange={(e) => setInsightsQuestion(e.target.value)}
-                    placeholder="Ask a question (e.g., 'Which topping sells the most?' or 'What is our peak hour of day?')"
-                    className="flex-grow bg-slate-800 border border-slate-700/80 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 transition-all focus:ring-2 focus:ring-amber-500/20"
-                  />
-                  <button
-                    onClick={() => askAI()}
-                    disabled={insightsLoading || !insightsQuestion.trim()}
-                    className={`px-6 py-3 rounded-xl font-bold text-sm tracking-wide transition-all uppercase flex items-center justify-center gap-2 cursor-pointer ${
-                      insightsLoading || !insightsQuestion.trim()
-                        ? "bg-slate-800 text-slate-500 cursor-not-allowed"
-                        : "bg-amber-500 text-slate-950 hover:bg-amber-400 shadow-md"
-                    }`}
-                  >
-                    {insightsLoading ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Analyzing...
-                      </>
-                    ) : (
-                      <>
-                        Analyze Data
-                        <ArrowRight className="w-4 h-4" />
-                      </>
-                    )}
-                  </button>
-                </div>
+                {/* Formatted text rendering functions inside block scope */}
+                {(() => {
+                  const parseBoldText = (text: string) => {
+                    const parts = text.split(/(\*\*.*?\*\*)/g);
+                    return parts.map((part, i) => {
+                      if (part.startsWith("**") && part.endsWith("**")) {
+                        return <strong key={i} className="font-bold text-amber-250">{part.slice(2, -2)}</strong>;
+                      }
+                      return part;
+                    });
+                  };
 
-                {/* Preset suggestions */}
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <span className="text-xs text-slate-500 font-bold self-center mr-1">Suggested Questions:</span>
-                  {[
-                    "Which topping sells the most?",
-                    "What was my busiest day this week?",
-                    "What is our peak business hour?",
-                    "How much have we made in total sales?"
-                  ].map((preset, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => {
-                        setInsightsQuestion(preset);
-                        askAI(preset);
-                      }}
-                      className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-lg border border-slate-700/50 cursor-pointer transition-colors"
-                    >
-                      {preset}
-                    </button>
-                  ))}
-                </div>
+                  const renderFormattedText = (text: string) => {
+                    return text.split("\n").map((line, idx) => {
+                      let cleanLine = line.trim();
+                      if (cleanLine.startsWith("### ")) {
+                        return (
+                          <h4 key={idx} className="text-sm font-bold text-amber-400 mt-2.5 mb-1.5 font-display tracking-wide uppercase first:mt-0">
+                            {cleanLine.replace("### ", "")}
+                          </h4>
+                        );
+                      }
+                      if (cleanLine.startsWith("- ") || cleanLine.startsWith("* ")) {
+                        const content = cleanLine.substring(2);
+                        return (
+                          <div key={idx} className="flex items-start gap-1.5 ml-1 my-0.5 text-slate-300 text-sm">
+                            <span className="text-amber-500 mt-1.5 font-bold shrink-0">•</span>
+                            <span className="flex-grow">{parseBoldText(content)}</span>
+                          </div>
+                        );
+                      }
+                      if (cleanLine === "") {
+                        return <div key={idx} className="h-1.5" />;
+                      }
+                      return (
+                        <p key={idx} className="text-slate-300 text-sm leading-relaxed my-0.5">
+                          {parseBoldText(line)}
+                        </p>
+                      );
+                    });
+                  };
 
-                {/* AI Answer block */}
-                {insightsAnswer && (
-                  <div className="bg-slate-850 border border-slate-800 p-5 rounded-xl space-y-2 mt-4">
-                    <div className="flex items-center gap-1.5 text-xs font-bold text-amber-500 uppercase tracking-widest">
-                      <Sparkles className="w-4.5 h-4.5" />
-                      AI Analyst Output
+                  return (
+                    <>
+                      {/* Chat feed area */}
+                      <div className="bg-slate-950/60 rounded-xl border border-slate-800/80 p-4 h-[380px] overflow-y-auto space-y-4 flex flex-col">
+                        {insightsChatHistory.map((msg, idx) => {
+                          const isBot = msg.sender === "bot";
+                          return (
+                            <div 
+                              key={idx} 
+                              className={`flex gap-2.5 max-w-[85%] ${isBot ? "self-start" : "self-end flex-row-reverse"}`}
+                            >
+                              {/* Avatar */}
+                              <div className={`w-7 w-7 h-7 rounded-lg flex items-center justify-center shrink-0 shadow-xs border text-[10px] ${
+                                isBot 
+                                  ? "bg-amber-500/10 text-amber-500 border-amber-500/20" 
+                                  : "bg-slate-800 text-slate-300 border-slate-700"
+                              }`}>
+                                {isBot ? <Bot className="w-3.5 h-3.5" /> : <User className="w-3.5 h-3.5" />}
+                              </div>
+
+                              {/* Bubble */}
+                              <div className={`p-3.5 rounded-2xl ${
+                                isBot 
+                                  ? "bg-slate-850/80 border border-slate-800/80 rounded-tl-none text-slate-200" 
+                                  : "bg-amber-500/10 text-amber-100 border border-amber-500/20 rounded-tr-none"
+                              }`}>
+                                {/* Sender name & timestamp */}
+                                <div className="flex items-center gap-1.5 mb-1.5 text-[9px] text-slate-500 font-bold uppercase tracking-wider">
+                                  <span>{isBot ? "SliceMatic Analyst" : "Rajan Sharma (Owner)"}</span>
+                                  <span>•</span>
+                                  <span>{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                </div>
+
+                                {/* Message body */}
+                                <div className="space-y-1">
+                                  {isBot ? renderFormattedText(msg.text) : <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {/* Loading indicator */}
+                        {insightsLoading && (
+                          <div className="flex gap-2.5 max-w-[85%] self-start animate-pulse">
+                            <div className="w-7 h-7 rounded-lg bg-amber-500/10 text-amber-500 border border-amber-500/20 flex items-center justify-center shrink-0">
+                              <Bot className="w-3.5 h-3.5" />
+                            </div>
+                            <div className="p-3.5 rounded-2xl bg-slate-850/80 border border-slate-800/80 rounded-tl-none flex items-center gap-2 text-slate-400 text-xs">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500" />
+                              <span>Analyzing metrics...</span>
+                            </div>
+                          </div>
+                        )}
+
+                        <div ref={chatEndRef} />
+                      </div>
+
+                      {/* Input & Action section */}
+                      <div className="space-y-3 pt-1">
+                        {/* Suggestions pills */}
+                        <div className="flex flex-wrap gap-1.5 items-center">
+                          <span className="text-[10px] text-slate-500 font-extrabold uppercase tracking-wider mr-1">Ask Preset:</span>
+                          {[
+                            "Which topping sells the most?",
+                            "What was my busiest day this week?",
+                            "What is our peak business hour?",
+                            "How much have we made in total sales?"
+                          ].map((preset, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => askAI(preset)}
+                              disabled={insightsLoading}
+                              className="text-[10px] bg-slate-800/90 hover:bg-slate-700 disabled:opacity-40 text-slate-300 px-2.5 py-1 rounded-lg border border-slate-750 cursor-pointer transition-all duration-150 active:scale-95 hover:text-white"
+                            >
+                              {preset}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Textbox & Send Button */}
+                        <div className="flex gap-2">
+                          <input 
+                            type="text" 
+                            value={insightsQuestion}
+                            onChange={(e) => setInsightsQuestion(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" && !insightsLoading && insightsQuestion.trim()) {
+                                askAI();
+                              }
+                            }}
+                            placeholder="Type your question (e.g. 'How is today's performance?')"
+                            className="flex-grow bg-slate-800 border border-slate-700/80 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-500 transition-all focus:ring-2 focus:ring-amber-500/20"
+                            disabled={insightsLoading}
+                          />
+                          <button
+                            onClick={() => askAI()}
+                            disabled={insightsLoading || !insightsQuestion.trim()}
+                            className={`px-5 rounded-xl font-bold text-sm tracking-wide transition-all uppercase flex items-center justify-center gap-2 cursor-pointer shrink-0 ${
+                              insightsLoading || !insightsQuestion.trim()
+                                ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                                : "bg-amber-500 text-slate-950 hover:bg-amber-400 shadow-md active:scale-95"
+                            }`}
+                          >
+                            <Send className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* MENU FILE MANAGER CARD */}
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-6 text-left">
+              <div className="flex items-center gap-2.5 border-b border-slate-100 pb-4">
+                <FileText className="w-5 h-5 text-amber-500" />
+                <div>
+                  <h3 className="font-bold text-lg font-display text-slate-800">Menu Loading & Management</h3>
+                  <p className="text-slate-400 text-xs">Upload customized text files to live-update the pizzeria menu across bases, pizzas, and toppings.</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {[
+                  { id: "menu_base.txt", label: "menu_base.txt (Crust Bases)", color: "border-amber-200 bg-amber-50/10" },
+                  { id: "menu_pizza.txt", label: "menu_pizza.txt (Pizza Styles)", color: "border-amber-200 bg-amber-50/10" },
+                  { id: "menu_toppings.txt", label: "menu_toppings.txt (Toppings)", color: "border-amber-200 bg-amber-50/10" }
+                ].map((fileSpec) => (
+                  <div key={fileSpec.id} className={`p-4 rounded-xl border-2 border-dashed ${fileSpec.color} flex flex-col justify-between space-y-4`}>
+                    <div className="space-y-1">
+                      <span className="font-bold text-xs text-slate-700 block">{fileSpec.label}</span>
+                      <p className="text-[11px] text-slate-450 leading-relaxed">Format: Name,Price<br />(e.g., <code>Thin Crust,150</code>)</p>
                     </div>
-                    <div className="text-slate-300 text-sm leading-relaxed whitespace-pre-line font-medium border-l-2 border-amber-500/40 pl-4 py-1">
-                      {insightsAnswer}
+
+                    <div className="space-y-2">
+                      <input 
+                        type="file"
+                        accept=".txt"
+                        id={`upload-${fileSpec.id}`}
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            handleMenuFileUpload(fileSpec.id, file);
+                          }
+                        }}
+                      />
+                      <label 
+                        htmlFor={`upload-${fileSpec.id}`}
+                        className="w-full bg-white border border-slate-200 hover:border-amber-400 hover:bg-amber-50/20 text-slate-700 font-bold text-xs py-2.5 px-3 rounded-lg shadow-xs cursor-pointer flex items-center justify-center gap-2 transition-all"
+                      >
+                        <Upload className="w-4 h-4 text-amber-500" />
+                        Upload {fileSpec.id}
+                      </label>
                     </div>
                   </div>
-                )}
+                ))}
               </div>
+
+              {/* Uploading Status / Logs */}
+              {menuUploadLogs.length > 0 && (
+                <div className="bg-slate-550 border border-slate-200 rounded-xl p-4 space-y-1.5 text-xs">
+                  <p className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">Parser execution logs:</p>
+                  <div className="font-mono space-y-1 max-h-32 overflow-y-auto text-slate-600 text-left">
+                    {menuUploadLogs.map((log, idx) => (
+                      <p key={idx} className={log.startsWith("Error") ? "text-rose-500" : log.startsWith("Warning") ? "text-amber-600" : log.startsWith("Success") ? "text-emerald-600" : "text-slate-600"}>
+                        {log}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* ORDERS LOG TABLE */}
