@@ -32,6 +32,18 @@ import {
   RotateCw
 } from "lucide-react";
 
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+} from "recharts";
+
 interface MenuItem {
   id: number;
   name: string;
@@ -1524,13 +1536,103 @@ Guidelines:
     }
   };
 
-  // Pre-calculate admin view cards
-  const stats = {
-    totalSales: orders.reduce((sum, o) => sum + o.total, 0),
-    orderCount: orders.length,
-    avgOrder: orders.length > 0 ? orders.reduce((sum, o) => sum + o.total, 0) / orders.length : 0,
-    discountGiven: orders.reduce((sum, o) => sum + o.discount, 0)
-  };
+  // Filter orders for the current day (today)
+  const todayOrders = useMemo(() => {
+    const todayStr = new Date().toDateString();
+    return orders.filter(o => new Date(o.created_at).toDateString() === todayStr);
+  }, [orders]);
+
+  // Pre-calculate admin view cards to show current day details only
+  const stats = useMemo(() => {
+    const totalSales = todayOrders.reduce((sum, o) => sum + o.total, 0);
+    const orderCount = todayOrders.length;
+    const avgOrder = orderCount > 0 ? totalSales / orderCount : 0;
+    const discountGiven = todayOrders.reduce((sum, o) => sum + o.discount, 0);
+    return {
+      totalSales,
+      orderCount,
+      avgOrder,
+      discountGiven
+    };
+  }, [todayOrders]);
+
+  // Sales by Day Trend Chart Data
+  const salesByDayData = useMemo(() => {
+    const dailyMap: Record<string, { rawDate: Date; dateStr: string; sales: number; count: number }> = {};
+    
+    orders.forEach(o => {
+      try {
+        const dateObj = new Date(o.created_at);
+        if (isNaN(dateObj.getTime())) return;
+        
+        const key = dateObj.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        const dayStart = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
+        
+        if (!dailyMap[key]) {
+          dailyMap[key] = {
+            rawDate: dayStart,
+            dateStr: key,
+            sales: 0,
+            count: 0
+          };
+        }
+        dailyMap[key].sales += o.total;
+        dailyMap[key].count += 1;
+      } catch (e) {
+        console.error(e);
+      }
+    });
+
+    return Object.values(dailyMap)
+      .sort((a, b) => a.rawDate.getTime() - b.rawDate.getTime())
+      .map(d => ({
+        name: d.dateStr,
+        Sales: parseFloat(d.sales.toFixed(2)),
+        Orders: d.count
+      }));
+  }, [orders]);
+
+  // Order Volume by Hour Trend Chart Data
+  const orderVolumeByHourData = useMemo(() => {
+    const hourlyMap: Record<number, { hourLabel: string; count: number; sales: number }> = {};
+    
+    // Initialize standard pizzeria hours (e.g. 12 AM to 11 PM) to make a nice continuous trend
+    for (let h = 0; h < 24; h++) {
+      const ampm = h >= 12 ? (h === 12 ? "12 PM" : `${h - 12} PM`) : (h === 0 ? "12 AM" : `${h} AM`);
+      hourlyMap[h] = {
+        hourLabel: ampm,
+        count: 0,
+        sales: 0
+      };
+    }
+
+    orders.forEach(o => {
+      try {
+        const dateObj = new Date(o.created_at);
+        if (isNaN(dateObj.getTime())) return;
+        
+        const hour = dateObj.getHours();
+        if (hourlyMap[hour]) {
+          hourlyMap[hour].count += 1;
+          hourlyMap[hour].sales += o.total;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    });
+
+    return Object.keys(hourlyMap)
+      .map(key => {
+        const h = parseInt(key);
+        return {
+          hour: h,
+          name: hourlyMap[h].hourLabel,
+          Orders: hourlyMap[h].count,
+          Sales: parseFloat(hourlyMap[h].sales.toFixed(2))
+        };
+      })
+      .sort((a, b) => a.hour - b.hour);
+  }, [orders]);
 
   return (
     <div className="min-h-screen flex flex-col antialiased bg-slate-50 text-slate-900 pb-16">
@@ -2944,49 +3046,159 @@ Guidelines:
               </div>
 
               {/* STATS OVERVIEW CARDS */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              
-              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
-                <div>
-                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider block">Total Sales</span>
-                  <span className="text-2xl font-bold font-mono text-slate-900 mt-1 block">₹{stats.totalSales.toFixed(2)}</span>
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-left">
+                  <div>
+                    <h3 className="text-lg font-bold font-display text-slate-800">Today's Performance Overview</h3>
+                    <p className="text-xs text-slate-400">Key metrics for current business day: {new Date().toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+                  </div>
+                  <span className="text-[10px] bg-amber-500/15 text-amber-800 border border-amber-500/25 px-2.5 py-1 rounded-full font-bold uppercase tracking-wider self-start sm:self-auto">
+                    Live Today
+                  </span>
                 </div>
-                <div className="bg-emerald-50 text-emerald-600 p-3 rounded-xl">
-                  <TrendingUp className="w-5 h-5" />
+
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
+                    <div className="text-left">
+                      <span className="text-slate-400 text-xs font-bold uppercase tracking-wider block">Today's Sales</span>
+                      <span className="text-2xl font-bold font-mono text-slate-900 mt-1 block">₹{stats.totalSales.toFixed(2)}</span>
+                    </div>
+                    <div className="bg-emerald-50 text-emerald-600 p-3 rounded-xl">
+                      <TrendingUp className="w-5 h-5" />
+                    </div>
+                  </div>
+
+                  <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
+                    <div className="text-left">
+                      <span className="text-slate-400 text-xs font-bold uppercase tracking-wider block">Today's Orders</span>
+                      <span className="text-2xl font-bold font-mono text-slate-900 mt-1 block">{stats.orderCount}</span>
+                    </div>
+                    <div className="bg-amber-50 text-amber-600 p-3 rounded-xl">
+                      <ShoppingBag className="w-5 h-5" />
+                    </div>
+                  </div>
+
+                  <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
+                    <div className="text-left">
+                      <span className="text-slate-400 text-xs font-bold uppercase tracking-wider block">Today's Avg Ticket</span>
+                      <span className="text-2xl font-bold font-mono text-slate-900 mt-1 block">₹{stats.avgOrder.toFixed(2)}</span>
+                    </div>
+                    <div className="bg-blue-50 text-blue-600 p-3 rounded-xl">
+                      <Receipt className="w-5 h-5" />
+                    </div>
+                  </div>
+
+                  <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
+                    <div className="text-left">
+                      <span className="text-slate-400 text-xs font-bold uppercase tracking-wider block">Today's Discounts</span>
+                      <span className="text-2xl font-bold font-mono text-slate-900 mt-1 block">₹{stats.discountGiven.toFixed(2)}</span>
+                    </div>
+                    <div className="bg-rose-50 text-rose-600 p-3 rounded-xl">
+                      <TrendingDown className="w-5 h-5" />
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
-                <div>
-                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider block">Order Count</span>
-                  <span className="text-2xl font-bold font-mono text-slate-900 mt-1 block">{stats.orderCount}</span>
+              {/* TREND VISUALIZATIONS CHARTS */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Sales Trend by Day */}
+                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-left space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="font-bold text-base font-display text-slate-800">Sales Trend by Day</h3>
+                      <p className="text-slate-400 text-xs">Total pizzeria gross revenue tracked daily</p>
+                    </div>
+                    <div className="bg-emerald-50 text-emerald-600 p-2.5 rounded-lg">
+                      <TrendingUp className="w-4 h-4" />
+                    </div>
+                  </div>
+                  
+                  <div className="h-64 w-full">
+                    {salesByDayData.length === 0 ? (
+                      <div className="h-full flex items-center justify-center border border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                        <p className="text-xs text-slate-400">No sales data available yet</p>
+                      </div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={salesByDayData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                          <defs>
+                            <linearGradient id="colorSalesAdmin" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor="#10b981" stopOpacity={0.2}/>
+                              <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                          <XAxis 
+                            dataKey="name" 
+                            tickLine={false} 
+                            axisLine={false} 
+                            tick={{ fill: '#94a3b8', fontSize: 11 }} 
+                          />
+                          <YAxis 
+                            tickLine={false} 
+                            axisLine={false} 
+                            tick={{ fill: '#94a3b8', fontSize: 11 }} 
+                            tickFormatter={(val) => `₹${val}`}
+                          />
+                          <Tooltip 
+                            contentStyle={{ background: '#0f172a', border: 'none', borderRadius: '12px', color: '#f8fafc' }}
+                            labelStyle={{ fontWeight: 'bold', color: '#fbbf24' }}
+                            formatter={(val: any) => [`₹${val}`, 'Sales']}
+                          />
+                          <Area type="monotone" dataKey="Sales" stroke="#10b981" strokeWidth={2.5} fillOpacity={1} fill="url(#colorSalesAdmin)" />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
                 </div>
-                <div className="bg-amber-50 text-amber-600 p-3 rounded-xl">
-                  <ShoppingBag className="w-5 h-5" />
+
+                {/* Order Volume by Hour Trend */}
+                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-left space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="font-bold text-base font-display text-slate-800">Order Volume by Hour Trend</h3>
+                      <p className="text-slate-400 text-xs">Peak customer demand distribution over operating hours</p>
+                    </div>
+                    <div className="bg-amber-50 text-amber-600 p-2.5 rounded-lg">
+                      <Clock className="w-4 h-4" />
+                    </div>
+                  </div>
+                  
+                  <div className="h-64 w-full">
+                    {orders.length === 0 ? (
+                      <div className="h-full flex items-center justify-center border border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                        <p className="text-xs text-slate-400">No order logs recorded yet</p>
+                      </div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={orderVolumeByHourData} margin={{ top: 10, right: 10, left: -25, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                          <XAxis 
+                            dataKey="name" 
+                            tickLine={false} 
+                            axisLine={false} 
+                            tick={{ fill: '#94a3b8', fontSize: 10 }}
+                            interval={2}
+                          />
+                          <YAxis 
+                            tickLine={false} 
+                            axisLine={false} 
+                            tick={{ fill: '#94a3b8', fontSize: 11 }}
+                            allowDecimals={false}
+                          />
+                          <Tooltip 
+                            contentStyle={{ background: '#0f172a', border: 'none', borderRadius: '12px', color: '#f8fafc' }}
+                            labelStyle={{ fontWeight: 'bold', color: '#fbbf24' }}
+                            formatter={(val: any) => [`${val} orders`, 'Volume']}
+                          />
+                          <Bar dataKey="Orders" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
                 </div>
               </div>
-
-              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
-                <div>
-                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider block">Average Ticket</span>
-                  <span className="text-2xl font-bold font-mono text-slate-900 mt-1 block">₹{stats.avgOrder.toFixed(2)}</span>
-                </div>
-                <div className="bg-blue-50 text-blue-600 p-3 rounded-xl">
-                  <Receipt className="w-5 h-5" />
-                </div>
-              </div>
-
-              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
-                <div>
-                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider block">Discounts Granted</span>
-                  <span className="text-2xl font-bold font-mono text-slate-900 mt-1 block">₹{stats.discountGiven.toFixed(2)}</span>
-                </div>
-                <div className="bg-rose-50 text-rose-600 p-3 rounded-xl">
-                  <TrendingDown className="w-5 h-5" />
-                </div>
-              </div>
-
-            </div>
 
             {/* AI DEMAND ASSISTANT PANEL */}
             <div className="bg-slate-900 text-slate-100 rounded-2xl p-6 shadow-xl border border-slate-800 space-y-5 text-left">
