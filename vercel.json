@@ -2,7 +2,10 @@
   "version": 2,
   "functions": {
     "api/index.ts": {
-      "includeFiles": "menu_*.txt"
+      "includeFiles": [
+        "menu_*.txt",
+        "data/slicematic_db.json"
+      ]
     }
   },
   "rewrites": [
