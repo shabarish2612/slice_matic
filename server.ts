@@ -704,7 +704,7 @@ ${recentOrders}
       if (!apiKey) {
         throw new Error("Neither GOOGLE_API_KEY nor GEMINI_API_KEY environment variable is configured.");
       }
-
+ 
       const ai = new GoogleGenAI({ 
         apiKey,
         httpOptions: {
@@ -717,7 +717,7 @@ ${recentOrders}
         model: "gemini-2.5-flash",
         contents: `Context:\n${systemPrompt}\n\nOwner Question: ${question}`
       });
-
+ 
       res.json({ success: true, answer: response.text });
     } catch (err: any) {
       console.error("Gemini AI API Error:", err);
