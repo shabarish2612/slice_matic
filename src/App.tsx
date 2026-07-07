@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { getSupabaseClient, isSupabaseConfigured, getSupabaseUrl, getSupabasePublishableKey, resetSupabaseClient } from "./lib/supabase";
 import { 
   Pizza, 
@@ -139,6 +139,9 @@ export default function App() {
   // Success receipt state
   const [placedOrder, setPlacedOrder] = useState<any>(null);
 
+  // Pre-made recipe feedback message
+  const [appliedRecipeMessage, setAppliedRecipeMessage] = useState<string | null>(null);
+
   // AI Insights state
   const [insightsQuestion, setInsightsQuestion] = useState("");
   const [insightsLoading, setInsightsLoading] = useState(false);
@@ -165,9 +168,10 @@ export default function App() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [apiError, setApiError] = useState<string | null>(null);
 
-  // Load menu items on startup
+  // Load menu items and historical orders on startup
   useEffect(() => {
     fetchMenu();
+    fetchOrders();
   }, []);
 
   // Fetch orders when switching to admin view
@@ -618,6 +622,244 @@ export default function App() {
     setSelectedToppings(lastToppings);
     setQuantity(last.quantity || 1);
     if (last.payment_mode) setPaymentMode(last.payment_mode);
+  };
+
+  // Analyze historical orders to extract and recommend best-selling pizza recipes
+  const suggestedRecipes = useMemo(() => {
+    // 1. Set up a few premium, delicious default recipes in case there aren't enough orders in the system yet.
+    // This ensures there is always a stellar visual experience.
+    const defaultSuggestions = [
+      {
+        name: "Margherita Classic",
+        badge: "Chef's Classic",
+        description: "Thin crust with traditional rich mozzarella & extra cheese",
+        baseName: "Thin Crust",
+        pizzaName: "Margherita",
+        toppingNames: ["Extra Cheese"]
+      },
+      {
+        name: "Farmhouse Delight",
+        badge: "Best Vegetarian",
+        description: "Cheese burst loaded with mushrooms & black olives",
+        baseName: "Cheese Burst",
+        pizzaName: "Farmhouse",
+        toppingNames: ["Mushrooms", "Black Olives"]
+      },
+      {
+        name: "Pepperoni Feast Special",
+        badge: "Meat Classic",
+        description: "Thick crust loaded with spicy pepperoni & extra cheese",
+        baseName: "Thick Crust",
+        pizzaName: "Pepperoni Feast",
+        toppingNames: ["Extra Cheese"]
+      },
+      {
+        name: "Chicken Tikka Supreme",
+        badge: "Spicy Treat",
+        description: "Cheese burst crust with savory grilled chicken & jalapeños",
+        baseName: "Cheese Burst",
+        pizzaName: "Chicken Tikka",
+        toppingNames: ["Grilled Chicken", "Jalapenos"]
+      }
+    ];
+
+    // 2. Parse combos from actual historical orders (both local and Supabase)
+    const orderCombos: {
+      baseName: string;
+      pizzaName: string;
+      toppingNames: string[];
+      quantity: number;
+    }[] = [];
+
+    orders.forEach(order => {
+      if (!order.items || order.items.length === 0) return;
+
+      const prefixGroups: Record<string, OrderItem[]> = {};
+      const fallbackItems: OrderItem[] = [];
+
+      order.items.forEach(item => {
+        const id = item.id || "";
+        const match = id.match(/^(oi-\d+-\d+)-(base|pizza|top)/);
+        if (match) {
+          const groupKey = match[1];
+          if (!prefixGroups[groupKey]) prefixGroups[groupKey] = [];
+          prefixGroups[groupKey].push(item);
+        } else {
+          fallbackItems.push(item);
+        }
+      });
+
+      // Process prefix-grouped items
+      Object.values(prefixGroups).forEach(group => {
+        const base = group.find(i => i.category === "Base");
+        const pizza = group.find(i => i.category === "Pizza");
+        const toppings = group.filter(i => i.category === "Topping");
+        if (base && pizza) {
+          orderCombos.push({
+            baseName: base.menu_item_name,
+            pizzaName: pizza.menu_item_name,
+            toppingNames: toppings.map(t => t.menu_item_name),
+            quantity: base.quantity || pizza.quantity || 1
+          });
+        }
+      });
+
+      // Process unstructured items
+      if (fallbackItems.length > 0) {
+        const bases = fallbackItems.filter(i => i.category === "Base");
+        const pizzas = fallbackItems.filter(i => i.category === "Pizza");
+        const toppings = fallbackItems.filter(i => i.category === "Topping");
+
+        if (bases.length === 1 && pizzas.length === 1) {
+          orderCombos.push({
+            baseName: bases[0].menu_item_name,
+            pizzaName: pizzas[0].menu_item_name,
+            toppingNames: toppings.map(t => t.menu_item_name),
+            quantity: bases[0].quantity || pizzas[0].quantity || 1
+          });
+        } else if (bases.length > 0 && pizzas.length > 0) {
+          const minLen = Math.min(bases.length, pizzas.length);
+          for (let i = 0; i < minLen; i++) {
+            const associatedToppings = i === 0 ? toppings.map(t => t.menu_item_name) : [];
+            orderCombos.push({
+              baseName: bases[i].menu_item_name,
+              pizzaName: pizzas[i].menu_item_name,
+              toppingNames: associatedToppings,
+              quantity: bases[i].quantity || pizzas[i].quantity || 1
+            });
+          }
+        }
+      }
+    });
+
+    // 3. Aggregate order quantities of unique combos
+    const aggregates: Record<string, {
+      baseName: string;
+      pizzaName: string;
+      toppingNames: string[];
+      volume: number;
+    }> = {};
+
+    orderCombos.forEach(combo => {
+      // Create a unique canonical key
+      const key = `${combo.baseName} | ${combo.pizzaName} | ${[...combo.toppingNames].sort().join(",")}`;
+      if (!aggregates[key]) {
+        aggregates[key] = {
+          baseName: combo.baseName,
+          pizzaName: combo.pizzaName,
+          toppingNames: combo.toppingNames,
+          volume: 0
+        };
+      }
+      aggregates[key].volume += combo.quantity;
+    });
+
+    // Sort aggregated historical combos by order volume
+    const sortedAggregates = Object.values(aggregates).sort((a, b) => b.volume - a.volume);
+
+    // 4. Match with the loaded menu items to construct valid, loadable recipes
+    const matchedRecipes: {
+      name: string;
+      badge: string;
+      description: string;
+      baseId: number;
+      baseName: string;
+      pizzaId: number;
+      pizzaName: string;
+      toppingIds: number[];
+      toppingNames: string[];
+      orderVolume: number;
+      price: number;
+    }[] = [];
+
+    // Combine historical aggregates first, then default recipes as fallback
+    const candidateRecipes = [
+      ...sortedAggregates.map((agg, idx) => ({
+        name: `${agg.pizzaName} Combo`,
+        badge: idx === 0 ? "🏆 Best Seller" : idx === 1 ? "🔥 Top Choice" : "⭐ Popular",
+        description: `Popular custom combo featuring ${agg.baseName} and ${agg.pizzaName}`,
+        baseName: agg.baseName,
+        pizzaName: agg.pizzaName,
+        toppingNames: agg.toppingNames,
+        volume: agg.volume
+      })),
+      ...defaultSuggestions.map(def => ({
+        name: def.name,
+        badge: def.badge,
+        description: def.description,
+        baseName: def.baseName,
+        pizzaName: def.pizzaName,
+        toppingNames: def.toppingNames,
+        volume: 0
+      }))
+    ];
+
+    // Filter and build actual recipes that exist in the loaded menu
+    candidateRecipes.forEach(cand => {
+      const baseItem = menu.find(m => m.category === "Base" && m.name.toLowerCase() === cand.baseName.toLowerCase());
+      const pizzaItem = menu.find(m => m.category === "Pizza" && m.name.toLowerCase() === cand.pizzaName.toLowerCase());
+      if (!baseItem || !pizzaItem) return; // Skip if items not in the loaded menu
+
+      // Find toppings in the menu
+      const toppingsList = cand.toppingNames.map(tName => 
+        menu.find(m => m.category === "Topping" && m.name.toLowerCase() === tName.toLowerCase())
+      ).filter((t): t is MenuItem => !!t);
+
+      // Avoid duplicates of the same combo configurations
+      const isDuplicate = matchedRecipes.some(
+        r => r.baseId === baseItem.id && 
+             r.pizzaId === pizzaItem.id && 
+             [...r.toppingIds].sort().join(",") === toppingsList.map(t => t.id).sort().join(",")
+      );
+      if (isDuplicate) return;
+
+      const toppingsPrice = toppingsList.reduce((sum, t) => sum + t.price, 0);
+      const totalPrice = baseItem.price + pizzaItem.price + toppingsPrice;
+
+      matchedRecipes.push({
+        name: cand.name,
+        badge: cand.badge,
+        description: cand.description,
+        baseId: baseItem.id,
+        baseName: baseItem.name,
+        pizzaId: pizzaItem.id,
+        pizzaName: pizzaItem.name,
+        toppingIds: toppingsList.map(t => t.id),
+        toppingNames: toppingsList.map(t => t.name),
+        orderVolume: cand.volume,
+        price: totalPrice
+      });
+    });
+
+    // Return the top 4 most relevant recipes (sorted with real order volume first)
+    return matchedRecipes.slice(0, 4);
+  }, [orders, menu]);
+
+  const applyRecipe = (recipe: any) => {
+    setSelectedBase(recipe.baseId);
+    setSelectedPizza(recipe.pizzaId);
+    setSelectedToppings(recipe.toppingIds);
+
+    // Update text box values so that they sync with the selections
+    setBaseNumberInput(recipe.baseId.toString());
+    setPizzaNumberInput(recipe.pizzaId.toString());
+    setToppingsNumberInput(recipe.toppingIds.join(", "));
+
+    // Clear related validation errors
+    setErrors(prev => {
+      const copy = { ...prev };
+      delete copy.baseInput;
+      delete copy.selectedBase;
+      delete copy.pizzaInput;
+      delete copy.selectedPizza;
+      delete copy.toppingsInput;
+      return copy;
+    });
+
+    setAppliedRecipeMessage(`Loaded "${recipe.name}"! Base, style & toppings are set.`);
+    setTimeout(() => {
+      setAppliedRecipeMessage(null);
+    }, 4000);
   };
 
   // Live Calculations (for client-side preview & dynamic basket summary)
@@ -1349,6 +1591,111 @@ Guidelines:
                 ) : (
                   <div className="space-y-6 text-left">
                     
+                    {/* CHEF'S POPULAR PRE-MADE RECIPES */}
+                    <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200/60 space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-3">
+                        <div className="flex items-center gap-2">
+                          <div className="bg-amber-500 text-slate-950 p-1.5 rounded-lg">
+                            <Sparkles className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <h3 className="font-bold text-sm font-display text-slate-800">
+                              👨‍🍳 Popular Pre-Made Recipes
+                            </h3>
+                            <p className="text-slate-400 text-[11px] font-medium">
+                              Best-selling combos calculated from real-time customer sales volume
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 self-start sm:self-center">
+                          <span className="h-1.5 w-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                          <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                            Live Sales Analysis
+                          </span>
+                        </div>
+                      </div>
+
+                      {appliedRecipeMessage && (
+                        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-2.5 text-xs font-bold flex items-center gap-2 animate-fade-in shadow-xs">
+                          <Check className="w-4 h-4 text-emerald-600" />
+                          {appliedRecipeMessage}
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        {suggestedRecipes.map((recipe, idx) => {
+                          const isSelected = selectedBase === recipe.baseId && 
+                                            selectedPizza === recipe.pizzaId && 
+                                            selectedToppings.length === recipe.toppingIds.length && 
+                                            recipe.toppingIds.every(tId => selectedToppings.includes(tId));
+                          return (
+                            <div 
+                              key={idx}
+                              onClick={() => applyRecipe(recipe)}
+                              className={`group relative bg-white hover:bg-amber-500/[0.01] border border-slate-200 hover:border-amber-400 p-4 rounded-xl shadow-xs hover:shadow-md transition-all duration-200 cursor-pointer flex flex-col justify-between text-left ${
+                                isSelected ? "ring-2 ring-amber-500 border-amber-400 bg-amber-500/[0.02]" : ""
+                              }`}
+                            >
+                              <div className="space-y-2">
+                                {/* Badge */}
+                                <div className="flex items-center justify-between gap-1.5">
+                                  <span className="text-[9px] bg-slate-100 group-hover:bg-amber-500/10 text-slate-600 group-hover:text-amber-700 font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md transition-colors">
+                                    {recipe.badge}
+                                  </span>
+                                  {recipe.orderVolume > 0 && (
+                                    <span className="text-[9px] font-mono text-slate-400 font-extrabold">
+                                      Vol: {recipe.orderVolume}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Recipe Title */}
+                                <h4 className="font-bold text-slate-800 text-sm group-hover:text-amber-950 transition-colors line-clamp-1">
+                                  {recipe.name}
+                                </h4>
+
+                                {/* Ingredients summary */}
+                                <div className="text-[11px] text-slate-500 space-y-1">
+                                  <p className="leading-tight line-clamp-2">{recipe.description}</p>
+                                  <div className="pt-1.5 border-t border-slate-100/80 space-y-0.5">
+                                    <p className="font-semibold text-slate-600 flex items-center gap-1">
+                                      <span className="text-amber-500">•</span> Crust: {recipe.baseName}
+                                    </p>
+                                    <p className="font-semibold text-slate-600 flex items-center gap-1">
+                                      <span className="text-amber-500">•</span> Style: {recipe.pizzaName}
+                                    </p>
+                                    {recipe.toppingNames.length > 0 && (
+                                      <p className="font-semibold text-slate-600 flex items-center gap-1 truncate" title={recipe.toppingNames.join(", ")}>
+                                        <span className="text-amber-500">•</span> Tops: {recipe.toppingNames.join(", ")}
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Price & Selection status */}
+                              <div className="mt-4 pt-2.5 border-t border-slate-100 flex items-center justify-between gap-1">
+                                <span className="text-sm font-extrabold text-slate-800">
+                                  ₹{recipe.price}
+                                </span>
+
+                                <button
+                                  type="button"
+                                  className={`text-[10px] font-extrabold px-2.5 py-1.5 rounded-lg border uppercase tracking-wider transition-all duration-150 cursor-pointer ${
+                                    isSelected
+                                      ? "bg-amber-500 border-amber-500 text-slate-950 font-extrabold"
+                                      : "bg-slate-50 group-hover:bg-amber-500 border-slate-200 group-hover:border-amber-400 text-slate-600 group-hover:text-slate-950"
+                                  }`}
+                                >
+                                  {isSelected ? "Selected" : "Apply"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
                     {/* CATEGORY 1: CRUST BASES */}
                     <div className="space-y-3">
                       <div className="flex items-baseline justify-between">
